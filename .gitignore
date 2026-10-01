@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment
+.env
+
+# Editor
+.vscode/
+
+# Generated data / reports (not source)
+output/*
+!output/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Supplier input data (large/binary, not source)
+input/*
+!input/.gitkeep
+
+# OS
+Thumbs.db
+.DS_Store
