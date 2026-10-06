@@ -1,135 +1,92 @@
-
 from pathlib import Path
+
 import pandas as pd
 
+
 BASE_DIR = Path(__file__).resolve().parents[2]
+INPUT_FILE = BASE_DIR / "output" / "manastore_mapped_product.xlsx"
+OUTPUT_FILE = BASE_DIR / "output" / "product_refinement_review.xlsx"
 
-INPUT_FILE = (
-    BASE_DIR / "output" / "manastore_mapped_product.xlsx"
-)
+FIELDS_FOR_REVIEW = [
+    "product_name",
+    "product_group",
+    "category_slug",
+    "description",
+    "selling_proce",
+    "image_url",
+]
 
-OUTPUT_FILE = (
-    BASE_DIR / "output" / "product_refinement_review.xlsx"
-)
+
+def _is_blank(value):
+    return pd.isna(value) or str(value).strip() == ""
+
 
 def refine_product(row):
-    """
-    Prepare a customer-facing product record.
-    Preserve supplier facts and keep approval pending.
-    """
+    """Keep supplier facts intact and flag missing decisions for human review."""
 
-    brand = str(row.get("brand_name", "")).strip()
-    fabric = str(row.get("fabric", "")).strip()
-    work = str(row.get("work", "")).strip()
-    blouse_fabric = str(row.get("blouse_fabric", "")).strip()
-    saree_length = str(row.get("saree_length", "")).strip()
-    blouse_length = str(row.get("blouse_length", "")).strip()
-
-    product_name = "Rajtex Ajrakh Printed Modal Satin Saree"
-
-    description_parts = [
-        "Discover this traditional Ajrakh printed saree from Rajtex.",
-        f"Fabric: {fabric}.",
-        f"Design: {work}.",
-        f"Blouse fabric: {blouse_fabric}."
+    pending = [
+        field for field in FIELDS_FOR_REVIEW
+        if _is_blank(row.get(field, ""))
     ]
-
-    if saree_length:
-        description_parts.append(
-            f"Saree length: {saree_length}."
-        )
-
-    if blouse_length:
-        description_parts.append(
-            f"Blouse length: {blouse_length}."
-        )
-
-    description = " ".join(
-        part for part in description_parts if part.strip()
-    )
-
     return pd.Series({
-        "product_group": "Rajtex-A",
-        "product_name": product_name,
-        "varient_name": "",
-        "description": description,
-        "selling_proce": 899,
-        "image-sku": "",
-        "image_url": "",
         "publish": False,
-        "review_status": "PENDING",
+        "review_status": "PENDING_REVIEW",
         "refinement_notes": (
-            "Image mapping requires manual review. "
-            "Seven source images are present; six design IDs "
-            "are currently specified."
-        )
+            "Manual review required for: " + ", ".join(pending)
+            if pending else "Ready for review."
+        ),
     })
 
-def create_image_manifest():
-    """
-    Create image identifiers without assuming which
-    source file belongs to each design.
-    """
 
-    image_ids = [
-        "Rajtex-A-035-A",
-        "Rajtex-A-035-B",
-        "Rajtex-A-035-C",
-        "Rajtex-A-035-D",
-        "Rajtex-A-035-E",
-        "Rajtex-A-035-F"
-    ]
+def create_image_manifest(inventory=None, products=None):
+    """Return a review manifest from discovered images, without SKU guessing."""
 
-    return pd.DataFrame({
-        "product_group": ["Rajtex-A"] * 6,
-        "supplier_sku": ["AM-1726I"] * 6,
-        "image_id": image_ids,
-        "source_image": [""] * 6,
-        "image_url": [""] * 6,
-        "image_status": ["PENDING_MANUAL_REVIEW"] * 6,
-        "approval_status": ["PENDING"] * 6
-    })
+    if inventory is None or inventory.empty:
+        return pd.DataFrame(columns=[
+            "supplier_sku", "image_id", "image_index", "source_image",
+            "image_url", "image_status", "approval_status",
+        ])
+
+    manifest = inventory.copy()
+    if "supplier_sku" not in manifest:
+        manifest["supplier_sku"] = ""
+    if "image_id" not in manifest:
+        manifest["image_id"] = manifest.get("filename", "")
+    if "image_index" not in manifest:
+        manifest["image_index"] = ""
+    if "source_image" not in manifest:
+        manifest["source_image"] = manifest.get("source_file", "")
+    manifest["image_url"] = ""
+    manifest["approval_status"] = "PENDING"
+    manifest["image_status"] = manifest.get("status", "PENDING_REVIEW")
+
+    if products is not None and "supplier_sku" in products:
+        known_skus = set(products["supplier_sku"].dropna().astype(str))
+        manifest.loc[
+            ~manifest["supplier_sku"].astype(str).isin(known_skus),
+            "image_status",
+        ] = "UNMATCHED"
+    return manifest
+
+
+def refine_products(df: pd.DataFrame, inventory=None) -> pd.DataFrame:
+    refined = df.copy()
+    review_fields = df.apply(refine_product, axis=1)
+    for column in review_fields.columns:
+        refined[column] = review_fields[column]
+    refined["publish"] = False
+    return refined, create_image_manifest(inventory, products=df)
 
 
 def main():
     if not INPUT_FILE.exists():
-        raise FileNotFoundError(
-            f"Input workbook not found: {INPUT_FILE}"
-        )
-
-    df = pd.read_excel(INPUT_FILE)
-
-    refined = df.copy()
-
-    review_fields = df.apply(refine_product, axis=1)
-
-    # Replace only fields intended for refinement.
-    for column in review_fields.columns:
-        refined[column] = review_fields[column]
-
-    image_manifest = create_image_manifest()
-
-    # Keep supplier and mapped source data in a separate sheet.
+        raise FileNotFoundError(f"Input workbook not found: {INPUT_FILE}")
+    df = pd.read_excel(INPUT_FILE, dtype={"supplier_sku": str})
+    refined, image_manifest = refine_products(df)
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        df.to_excel(
-            writer,
-            sheet_name="Mapped_Source",
-            index=False
-        )
-
-        refined.to_excel(
-            writer,
-            sheet_name="Refinement_Review",
-            index=False
-        )
-
-        image_manifest.to_excel(
-            writer,
-            sheet_name="Image_Manifest",
-            index=False
-        )
-
-    print("Product refinement workbook generated.")
+        df.to_excel(writer, sheet_name="Mapped_Source", index=False)
+        refined.to_excel(writer, sheet_name="Refinement_Review", index=False)
+        image_manifest.to_excel(writer, sheet_name="Image_Manifest", index=False)
     print(f"Output: {OUTPUT_FILE}")
     print(f"Products: {len(refined)}")
 

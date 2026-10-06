@@ -3,22 +3,25 @@ from pathlib import Path
 import pandas as pd
 
 
-REQUIRED_FIELDS = [
-    "supplier_name",
-    "supplier_sku",
-    "product_type",
-    "brand_name",
-    "fabric",
-    "work",
-    "supplier_price",
-    "gst_percent",
-]
+REQUIRED_FIELDS = ["supplier_sku"]
 
 FIELDS_FOR_REVIEW = [
+    "supplier_name",
+    "catalog_name",
+    "product_type",
     "product_name",
+    "product_group",
+    "category_slug",
+    "brand_name",
+    "fabric",
+    "blouse_fabric",
+    "work",
+    "occasion",
+    "size",
     "description",
+    "supplier_price",
+    "gst_percent",
     "selling_proce",
-    "image-sku",
     "image_url",
 ]
 
@@ -62,7 +65,7 @@ def validate_products(df: pd.DataFrame):
                 seen_skus.add(sku.casefold())
 
         # Numeric checks
-        for field in ["supplier_price", "gst_percent"]:
+        for field in ["supplier_price", "gst_percent", "selling_proce"]:
             value = row.get(field)
 
             if not is_blank(value):
@@ -101,7 +104,7 @@ def validate_products(df: pd.DataFrame):
         # Draft safety check
         publish = row.get("publish")
 
-        if not is_blank(publish) and str(publish).strip().lower() not in [
+        if is_blank(publish) or str(publish).strip().lower() not in [
             "false", "0", "no"
         ]:
             findings.append({
@@ -145,16 +148,12 @@ def main():
 
     report_file = report_dir / "product_validation_report.xlsx"
 
+    error_count = int((findings["severity"] == "ERROR").sum())
+    warning_count = int((findings["severity"] == "WARNING").sum())
     summary = pd.DataFrame([
         {"metric": "Products checked", "count": len(df)},
-        {
-            "metric": "Errors",
-            "count": int((findings["severity"] == "ERROR").sum()),
-        },
-        {
-            "metric": "Warnings",
-            "count": int((findings["severity"] == "WARNING").sum()),
-        },
+        {"metric": "Errors", "count": error_count},
+        {"metric": "Warnings", "count": warning_count},
     ])
 
     with pd.ExcelWriter(report_file, engine="openpyxl") as writer:
@@ -164,16 +163,6 @@ def main():
         findings.to_excel(
             writer, sheet_name="Findings", index=False
         )
-
-    error_count = (
-        int((findings["severity"] == "ERROR").sum())
-        if not findings.empty else 0
-    )
-
-    warning_count = (
-        int((findings["severity"] == "WARNING").sum())
-        if not findings.empty else 0
-    )
 
     print("Validation completed.")
     print(f"Products checked: {len(df)}")
