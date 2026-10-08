@@ -1,104 +1,47 @@
-
+import json
 from pathlib import Path
 import pandas as pd
 
+BASE_DIR = Path(__file__).resolve().parents[2]
+SCHEMA_FILE = BASE_DIR / "config" / "mana_store_schema.json"
 
-# Standard fields for the product import workbook.
-MANASTORE_COLUMNS = [
-    "supplier_name",
-    "catalog_name",
-    "product_group",
-    "product_name",
-    "varient_name",
-    "supplier_sku",
-    "product_type",
-    "category_slug",
-    "brand_name",
-    "fabric",
-    "blouse_fabric",
-    "work",
-    "occasion",
-    "size",
-    "description",
-    "supplier_price",
-    "gst_percent",
-    "selling_proce",
-    "image-sku",
-    "image_url",
-    "publish",
-]
+with SCHEMA_FILE.open(encoding="utf-8") as handle:
+    SCHEMA = json.load(handle)
 
+MANASTORE_COLUMNS = SCHEMA["columns"]
+DEFAULT_VALUES = SCHEMA["default_values"]
 
 def map_to_manastore(df: pd.DataFrame) -> pd.DataFrame:
-    """Map extracted supplier fields to ManaStore import columns."""
+    """Map normalized supplier fields into the canonical MANA Store schema.
 
+    Unknown supplier columns are preserved nowhere in the final production
+    sheet; source data should remain available in the upstream raw workbook.
+    Missing optional MANA fields are left blank rather than guessed.
+    """
     mapped = pd.DataFrame(index=df.index)
 
-    # Direct field mappings
-    field_mapping = {
-        "supplier_name": "supplier_name",
-        "catalogue_name": "catalog_name",
-        "brand_name": "brand_name",
-        "supplier_sku": "supplier_sku",
-        "product_type": "product_type",
-        "saree_fabric": "fabric",
-        "blouse_fabric": "blouse_fabric",
-        "work": "work",
-        "occasion": "occasion",
-        "supplier_price": "supplier_price",
-        "gst_percent": "gst_percent",
-    }
+    for target in MANASTORE_COLUMNS:
+        if target in df.columns:
+            mapped[target] = df[target]
+        else:
+            mapped[target] = DEFAULT_VALUES.get(target, "")
 
-    for source, target in field_mapping.items():
-        if source in df.columns:
-            mapped[target] = df[source]
+    if "supplier_sku" not in df.columns:
+        raise ValueError("Supplier input must contain a supplier_sku identity field.")
+    if df["supplier_sku"].astype(str).str.strip().eq("").any():
+        raise ValueError("supplier_sku cannot be blank.")
 
-    # Fields requiring refinement or user input
-    mapped["product_group"] = "Sarees"
-    mapped["product_name"] = ""
-    mapped["varient_name"] = ""
-    mapped["category_slug"] = "sarees"
-    mapped["size"] = (
-        "Saree 5.5 m, blouse 0.8 m"
-    )
-    mapped["description"] = ""
-    mapped["selling_proce"] = ""
-    mapped["image-sku"] = ""
-    mapped["image_url"] = ""
-
-    # Products must remain unpublished until reviewed.
     mapped["publish"] = False
-
-    # Keep all expected columns in the correct order.
-    return mapped.reindex(columns=MANASTORE_COLUMNS)
-
-
-def main():
-    project_root = Path(__file__).resolve().parents[2]
-
-    input_file = (
-        project_root
-        / "output"
-        / "extracted_supplier_data.xlsx"
-    )
-
-    output_dir = project_root / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    df = pd.read_excel(input_file, dtype={"supplier_sku": str})
-    mapped = map_to_manastore(df)
-
-    output_file = (
-        output_dir / "manastore_mapped_product.xlsx"
-    )
-
-    mapped.to_excel(output_file, index=False)
-
-    print("ManaStore schema mapping successful.")
-    print(f"Products mapped: {len(mapped)}")
-    print(f"Columns generated: {len(mapped.columns)}")
-    print(f"Output saved: {output_file}")
-
+    return mapped[MANASTORE_COLUMNS]
 
 if __name__ == "__main__":
-    main()
+    input_file = BASE_DIR / "output" / "extracted_supplier_data.xlsx"
+    output_file = BASE_DIR / "output" / "manastore_mapped_product.xlsx"
+
+    df = pd.read_excel(input_file, dtype=str).fillna("")
+    mapped = map_to_manastore(df)
+    mapped.to_excel(output_file, index=False)
+
+    print("MANA Store schema mapping successful.")
+    print(f"Products mapped: {len(mapped)}")
+    print(f"Output saved: {output_file}")
