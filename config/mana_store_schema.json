@@ -1,0 +1,38 @@
+{
+  "columns": [
+    "supplier_name",
+    "catalog_name",
+    "product_group",
+    "product_name",
+    "varient_name",
+    "supplier_sku",
+    "product_type",
+    "category_slug",
+    "brand_name",
+    "fabric",
+    "blouse_fabric",
+    "work",
+    "occasion",
+    "size",
+    "description",
+    "supplier_price",
+    "gst_percent",
+    "selling_proce",
+    "image-sku",
+    "image_url",
+    "publish"
+  ],
+  "required_identity": ["supplier_sku"],
+  "default_values": {
+    "product_group": "",
+    "product_name": "",
+    "varient_name": "",
+    "category_slug": "",
+    "size": "",
+    "description": "",
+    "selling_proce": "",
+    "image-sku": "",
+    "image_url": "",
+    "publish": false
+  }
+}
