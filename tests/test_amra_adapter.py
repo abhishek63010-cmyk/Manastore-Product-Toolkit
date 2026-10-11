@@ -81,16 +81,31 @@ def test_amra_adapter_transform_gold_master(project_root):
     assert v_first.source_metadata.field_provenance["variant_name"].source_type == FieldSource.SOURCE
 
 
-def test_amra_adapter_single_catalog_raw_file(project_root):
+def test_amra_adapter_single_catalog_raw_file(tmp_path: Path):
     """
-    Verify AmraAdapter processing single-catalog raw fixture (input/AMRA-RAJTEX-001/raw_supplier_data.xlsx).
+    Verify AmraAdapter processing single-catalog raw fixture with explicit variant attributes.
     Ensures:
     - Saree attributes extracted (fabric, blouse_fabric, saree_length, etc.)
     - Unmapped fields preserved in raw_attributes (e.g. stitch_type, dispatch_location)
     - Selling price is NOT invented (leaves selling_price as None)
     """
-    fixture_path = project_root / "input" / "AMRA-RAJTEX-001" / "raw_supplier_data.xlsx"
-    assert fixture_path.exists(), "AMRA-RAJTEX-001 fixture must exist"
+    import pandas as pd
+    fixture_path = tmp_path / "raw_supplier_data.xlsx"
+    df = pd.DataFrame([{
+        "Catalogue Name": "Rajtex Ajrakh Vol-35",
+        "Brand Name": "Rajtex",
+        "Supplier SKU": "AM-1726I",
+        "Supplier Price": "₹ 780",
+        "GST": "5%",
+        "Fabric": "Modal Satin",
+        "Blouse Fabric": "Modal Satin",
+        "Work": "Ajrakh Block Printed Work",
+        "Stitch Type": "Unstitched",
+        "Dispatch Location": "Surat, India",
+        "design_count": "6",
+        "source_upload_date": "2026-09-28",
+    }])
+    df.to_excel(fixture_path, index=False)
 
     raw_data = TabularExtractor.extract(fixture_path)
     adapter = AmraAdapter()
@@ -108,7 +123,6 @@ def test_amra_adapter_single_catalog_raw_file(project_root):
     assert product.get_attribute("fabric") == "Modal Satin"
     assert product.get_attribute("blouse_fabric") == "Modal Satin"
     assert product.get_attribute("work") == "Ajrakh Block Printed Work"
-    # Verify category attributes
     assert product.get_attribute("stitch_type") == "Unstitched"
     assert product.dispatch_location == "Surat, India"
 
@@ -124,3 +138,4 @@ def test_amra_adapter_single_catalog_raw_file(project_root):
     # CRITICAL: Verify selling_price is NOT invented
     assert variant.selling_price is None
     assert variant.source_metadata.field_provenance["selling_price"].source_type == FieldSource.MANUAL_REVIEW
+

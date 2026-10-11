@@ -2,9 +2,11 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from src.exporters.canonical import CanonicalExport
+from src.images.manifest import ImageApprovalManifest
 from src.images.matcher import ImageMatchReport
 from src.images.uploader import ImageUploadSummary
 from src.models.product import Product
+from src.models.refined import RefinedExport
 from src.models.validation import ValidationReport
 
 
@@ -15,7 +17,10 @@ class PipelineMetrics(BaseModel):
     total_variants: int = 0
     total_images_discovered: int = 0
     total_images_matched: int = 0
+    total_images_ambiguous: int = 0
+    total_images_approved: int = 0
     total_images_uploaded: int = 0
+    total_variants_requiring_review: int = 0
     total_validation_errors: int = 0
     total_validation_warnings: int = 0
     is_valid: bool = True
@@ -37,18 +42,27 @@ class PipelineResult(BaseModel):
     export_data: Optional[CanonicalExport] = None
     validation_report: Optional[ValidationReport] = None
     match_report: Optional[ImageMatchReport] = None
+    approval_manifest: Optional[ImageApprovalManifest] = None
+    refined_export: Optional[RefinedExport] = None
     upload_summary: Optional[ImageUploadSummary] = None
+    ocr_results: list[Any] = Field(default_factory=list)
     error_message: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert result into a serializable summary dictionary."""
-        return {
+        d = {
             "success": self.success,
             "adapter_used": self.adapter_used,
             "metrics": self.metrics.model_dump(),
             "output_files": self.output_files,
             "error_message": self.error_message,
+            "ocr_count": len(self.ocr_results),
         }
+        if self.approval_manifest:
+            d["manifest_summary"] = self.approval_manifest.summary()
+        if self.refined_export:
+            d["refined_summary"] = self.refined_export.summary()
+        return d
 
     def format_summary_text(self) -> str:
         """Render a readable summary table for terminal logging."""
@@ -66,7 +80,10 @@ class PipelineResult(BaseModel):
             "--------------------------------------------------",
             f"Images Discovered:  {self.metrics.total_images_discovered}",
             f"Images Matched:     {self.metrics.total_images_matched}",
+            f"Images Ambiguous:   {self.metrics.total_images_ambiguous}",
+            f"Images Approved:    {self.metrics.total_images_approved}",
             f"Images Uploaded:    {self.metrics.total_images_uploaded}",
+            f"Review Required:    {self.metrics.total_variants_requiring_review}",
             "--------------------------------------------------",
             f"Validation Status:  {val_status}",
             f"Validation Errors:  {self.metrics.total_validation_errors}",

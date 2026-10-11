@@ -119,3 +119,67 @@ class BaseSupplierAdapter(ABC):
             raw_value=raw_value,
             notes=notes,
         )
+
+    VARIANT_COUNT_ALIASES = [
+        "total_designs",
+        "total_design",
+        "total_pieces",
+        "total_piece",
+        "full_catalogue",
+        "full_catalog",
+        "piece_count",
+        "no_of_designs",
+        "designs_count",
+        "variant_count",
+    ]
+
+    @staticmethod
+    def parse_variant_count(val: Any) -> Optional[int]:
+        """
+        Parse expected variant/design count from heterogeneous supplier formats:
+        - Parenthesized: '₹8490 (6 Pcs)' -> 6
+        - Plain quantity: '6 Pcs', '6 Designs', '1 Pc' -> 6, 1
+        - Sets/Packs: 'Pack of 4', 'Set of 6' -> 4, 6
+        - Pure numeric: 6, 6.0, '6' -> 6
+        """
+        if val is None:
+            return None
+        if isinstance(val, int):
+            return val if val > 0 else None
+        if isinstance(val, float):
+            return int(val) if val.is_integer() and val > 0 else None
+        s = str(val).strip()
+        if not s or s.lower() in ("nan", "none", "null"):
+            return None
+
+        # 1. Parenthesized piece count (e.g., '₹8490 (6 Pcs)', 'Total (8 Pcs)')
+        m_paren = re.search(r"\(\s*(\d+)\s*(?:pcs?|pieces?|designs?|items?)\b", s, re.IGNORECASE)
+        if m_paren:
+            return int(m_paren.group(1))
+
+        # 2. Standalone piece count (e.g., '6 Pcs', '1 Pc', '8 Designs')
+        m_pcs = re.search(r"\b(\d+)\s*(?:pcs?|pieces?|designs?|items?)\b", s, re.IGNORECASE)
+        if m_pcs:
+            return int(m_pcs.group(1))
+
+        # 3. Pack or set format (e.g., 'Pack of 4', 'Set of 6')
+        m_pack = re.search(r"\b(?:pack|set)\s+of\s+(\d+)\b", s, re.IGNORECASE)
+        if m_pack:
+            return int(m_pack.group(1))
+
+        # 4. Pure integer string (e.g., '6')
+        if s.isdigit():
+            return int(s)
+
+        return None
+
+    @classmethod
+    def find_variant_count(cls, record: RawRecord) -> Optional[int]:
+        """Inspect a RawRecord for any variant count indicator."""
+        for alias in cls.VARIANT_COUNT_ALIASES:
+            _, val = cls.find_field_value(record, [alias])
+            if val is not None:
+                parsed = cls.parse_variant_count(val)
+                if parsed and parsed > 0:
+                    return parsed
+        return None

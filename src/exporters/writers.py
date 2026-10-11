@@ -6,6 +6,8 @@ import openpyxl
 
 from src.exporters.canonical import CanonicalExport
 from src.images.matcher import ImageMatchReport
+from src.models.product import Product
+from src.models.refined import RefinedExport
 from src.models.validation import ValidationReport
 from src.uploaders.base import UploadResult
 
@@ -264,3 +266,140 @@ class OutputWriter:
             encoding="utf-8",
         )
         return target.resolve()
+
+    @classmethod
+    def write_refined_xlsx(
+        cls,
+        refined_data: RefinedExport,
+        output_path: Union[str, Path],
+    ) -> Path:
+        """
+        Export multi-sheet refined products workbook containing:
+        1. Refined_Variants: All actual and derived variants with supplier facts, approved image identity, and OCR evidence.
+        2. Review_Required: Filtered variants with flags, discrepancies, missing approved images, or validation issues.
+        3. Audit_Summary: High-level metric counts for quality control.
+        """
+        target = Path(output_path)
+        if target.is_dir() or target.suffix == "":
+            target.mkdir(parents=True, exist_ok=True)
+            target = target / "refined_products.xlsx"
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+        rows = refined_data.to_flat_records()
+        df_all = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+            "catalog_name", "product_name", "variant_code", "variant_name",
+            "supplier_sku", "has_approved_image", "ocr_status", "requires_review"
+        ])
+
+        rev_rows = refined_data.review_required_records()
+        df_rev = pd.DataFrame(rev_rows) if rev_rows else pd.DataFrame(columns=df_all.columns)
+
+        summary_data = [
+            {"Metric": "Total Variants", "Count": refined_data.total_variants},
+            {"Metric": "Variants with Approved Image", "Count": refined_data.approved_image_variants},
+            {"Metric": "Variants with Successful OCR", "Count": refined_data.ocr_enriched_variants},
+            {"Metric": "Variants with Uploaded Blob URL", "Count": refined_data.uploaded_variants},
+            {"Metric": "Variants Requiring Review", "Count": refined_data.variants_requiring_review},
+        ]
+        df_summary = pd.DataFrame(summary_data)
+
+        with pd.ExcelWriter(target, engine="openpyxl") as writer:
+            df_all.to_excel(writer, sheet_name="Refined_Variants", index=False)
+            df_rev.to_excel(writer, sheet_name="Review_Required", index=False)
+            df_summary.to_excel(writer, sheet_name="Audit_Summary", index=False)
+
+        return target.resolve()
+
+    @classmethod
+    def write_mana_store_import_xlsx(
+        cls,
+        products: list[Product],
+        output_path: Union[str, Path],
+        max_gallery_columns: int = 5,
+    ) -> Path:
+        """
+        Export the final MANA Store admin-import workbook conforming strictly
+        to the website importer contract ('Import Ready' sheet).
+        
+        Guarantees:
+        - Actual supplier SKU preserved separately from internal variant code.
+        - main_image_url populated ONLY when a verified uploaded Blob URL exists.
+        - publish is strictly False (never auto-publishes to the website).
+        - Includes standard 'IMPORT_INSTRUCTIONS' worksheet.
+        """
+        target = Path(output_path)
+        if target.is_dir() or target.suffix == "":
+            target.mkdir(parents=True, exist_ok=True)
+            target = target / "mana_store_import_ready.xlsx"
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+        import_rows: list[dict[str, Any]] = []
+
+        for prod in products:
+            for var in prod.variants:
+                # Determine verified Blob URL for primary image
+                main_image_url = ""
+                if var.primary_image_url and ("blob.vercel-storage.com" in var.primary_image_url or "blob" in var.primary_image_url):
+                    main_image_url = var.primary_image_url
+                elif var.images and any(img.blob_url for img in var.images):
+                    main_image_url = next(img.blob_url for img in var.images if img.blob_url)
+
+                # Filter gallery URLs for verified Blob URLs only
+                gallery_blob_urls = [
+                    u for u in var.gallery_image_urls
+                    if u and ("blob.vercel-storage.com" in u or "blob" in u) and u != main_image_url
+                ]
+
+                row: dict[str, Any] = {
+                    "supplier_name": prod.supplier_name,
+                    "catalog_name": prod.catalog_name,
+                    "product_group": prod.product_group or "",
+                    "product_name": prod.product_name,
+                    "variant_name": var.variant_name,
+                    "supplier_sku": var.supplier_sku or "",  # Preserved separately from variant_code
+                    "image_sku": var.image_sku or "",
+                    "category_slug": prod.category_slug or "sarees",
+                    "brand_name": prod.brand_name or "",
+                    "fabric": prod.get_attribute("fabric") or var.attributes.get("fabric", ""),
+                    "blouse_fabric": prod.get_attribute("blouse_fabric") or var.attributes.get("blouse_fabric", ""),
+                    "work": prod.get_attribute("work") or var.attributes.get("work", ""),
+                    "occasion": prod.get_attribute("occasion") or var.attributes.get("occasion", ""),
+                    "size": var.size or prod.get_attribute("size", ""),
+                    "description": prod.description or "",
+                    "supplier_price": prod.supplier_price if prod.supplier_price is not None else (var.supplier_cost if var.supplier_cost is not None else ""),
+                    "gst_percent": prod.gst_percent if prod.gst_percent is not None else "",
+                    "selling_price": var.selling_price if var.selling_price is not None else "",
+                    "publish": False,  # Never auto-publish
+                    "main_image_url": main_image_url,
+                }
+
+                # Gallery columns
+                for i in range(1, max_gallery_columns + 1):
+                    col_key = f"image_{i}_url"
+                    idx = i - 1
+                    row[col_key] = gallery_blob_urls[idx] if idx < len(gallery_blob_urls) else ""
+
+                import_rows.append(row)
+
+        df_import = pd.DataFrame(import_rows) if import_rows else pd.DataFrame(columns=[
+            "supplier_name", "catalog_name", "product_name", "variant_name",
+            "supplier_sku", "selling_price", "publish", "main_image_url"
+        ])
+
+        # Instructions sheet
+        instructions_data = [
+            {"Step": "1. Review Pricing", "Guidance": "Verify and enter selling_price for each variant before publishing."},
+            {"Step": "2. Verify Images", "Guidance": "Rows with empty main_image_url require image approval and upload before publishing."},
+            {"Step": "3. Publishing Gate", "Guidance": "Keep publish column as FALSE until human review is complete."},
+            {"Step": "4. Import to Admin", "Guidance": "Upload this spreadsheet into MANA Store Admin Import Interface."},
+        ]
+        df_instructions = pd.DataFrame(instructions_data)
+
+        with pd.ExcelWriter(target, engine="openpyxl") as writer:
+            df_import.to_excel(writer, sheet_name="Import Ready", index=False)
+            df_instructions.to_excel(writer, sheet_name="IMPORT_INSTRUCTIONS", index=False)
+
+        return target.resolve()
+

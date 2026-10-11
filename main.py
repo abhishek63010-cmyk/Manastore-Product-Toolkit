@@ -106,6 +106,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit execution result strictly as machine-readable JSON to stdout",
     )
     parser.add_argument(
+        "--ocr", "--enable-ocr",
+        dest="enable_ocr",
+        action="store_true",
+        default=False,
+        help="Run OCR text extraction on discovered images or document assets",
+    )
+    parser.add_argument(
+        "--ocr-provider",
+        dest="ocr_provider",
+        type=str,
+        default=None,
+        help="Explicit OCR provider override ('fake', 'tesseract')",
+    )
+    parser.add_argument(
+        "--manifest",
+        dest="manifest_path",
+        type=str,
+        default=None,
+        help="Path to pre-approved image approval manifest JSON file",
+    )
+    parser.add_argument(
+        "--require-image-approval",
+        dest="require_image_approval",
+        action="store_true",
+        default=False,
+        help="Require explicit APPROVED status in image manifest before uploading",
+    )
+    parser.add_argument(
         "--list-adapters",
         action="store_true",
         default=False,
@@ -152,6 +180,10 @@ def main() -> int:
         images_path=Path(args.images_path) if args.images_path else None,
         upload_images=args.upload_images,
         upload_prefix=args.upload_prefix,
+        enable_ocr=args.enable_ocr,
+        ocr_provider=args.ocr_provider,
+        manifest_path=Path(args.manifest_path) if args.manifest_path else None,
+        require_image_approval=args.require_image_approval,
         export_formats=formats,
         dry_run=args.dry_run,
         fail_on_error=args.fail_on_error,
