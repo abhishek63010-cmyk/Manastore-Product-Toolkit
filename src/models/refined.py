@@ -36,7 +36,7 @@ class RefinedVariantRecord(BaseModel):
     stock_quantity: Optional[int] = None
     description: Optional[str] = None
 
-    # Approved Image Assignment & Integrity
+    # Approved Image Assignment & Identity
     has_approved_image: bool = False
     image_id: Optional[str] = None
     image_filename: Optional[str] = None
@@ -45,6 +45,16 @@ class RefinedVariantRecord(BaseModel):
     approved_by: Optional[str] = None
     approved_at: Optional[str] = None
     assignment_hash: Optional[str] = None
+
+    # Canonical Image-Enriched Fields (Populated ONLY after approval and analysis)
+    image_sku: Optional[str] = None  # Exact image SKU from user manifest / image OCR
+    color: Optional[str] = None      # Provisional canonical color derived from image pixels
+
+    # Image Pixel Color Analysis Provenance
+    image_color_status: str = "NOT_ANALYZED"  # EXTRACTED, UNCERTAIN, BACKGROUND_ONLY, FAILED, NOT_ANALYZED
+    image_color_confidence: Optional[float] = None
+    image_color_hex: Optional[str] = None
+    image_color_notes: Optional[str] = None
 
     # Provisional OCR Candidates (Evidence from approved images)
     ocr_status: str = "NOT_RUN"  # SUCCESS, NO_TEXT_FOUND, PROVIDER_UNAVAILABLE, FAILED, NOT_RUN
@@ -103,6 +113,16 @@ class RefinedVariantRecord(BaseModel):
             "approved_by": self.approved_by,
             "approved_at": self.approved_at,
             "assignment_hash": self.assignment_hash,
+
+            # Enriched Canonical Attributes from Approved Images
+            "image_sku": self.image_sku,
+            "color": self.color,
+
+            # Image Color Analysis Provenance
+            "image_color_status": self.image_color_status,
+            "image_color_confidence": self.image_color_confidence,
+            "image_color_hex": self.image_color_hex,
+            "image_color_notes": self.image_color_notes,
 
             # Provisional OCR Evidence
             "ocr_status": self.ocr_status,

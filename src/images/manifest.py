@@ -34,7 +34,18 @@ class ImageManifestEntry(BaseModel):
     proposed_variant_code: Optional[str] = Field(default=None, description="Proposed target variant code")
     match_status: MatchStatus = Field(..., description="Automatic match status (MATCHED, AMBIGUOUS, UNMATCHED)")
     match_strategy: Optional[str] = Field(default=None, description="Matching rule/strategy used")
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Match confidence score")
+    image_sku: Optional[str] = Field(
+        default=None,
+        description="Explicit user-supplied or verified image SKU"
+    )
+    detected_color: Optional[str] = Field(
+        default=None,
+        description="Analyzed canonical color derived from image pixels"
+    )
+    color_evidence: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Provenance and diagnostics of image pixel color analysis"
+    )
     ocr_evidence: Optional[dict[str, Any]] = Field(
         default=None,
         description="Structured candidate attributes from OCR used to guide assignment"
@@ -80,12 +91,17 @@ class ImageManifestEntry(BaseModel):
         ocr_result: Optional[OCRResult] = None,
     ) -> "ImageManifestEntry":
         ocr_summary = None
+        extracted_sku = None
         if ocr_result and ocr_result.candidate_fields:
             ocr_summary = {
                 "provider": ocr_result.provider,
                 "confidence": ocr_result.confidence,
                 "candidates": {c.field_name: c.candidate_value for c in ocr_result.candidate_fields},
             }
+            # Check for printed SKU candidate
+            cand_sku = ocr_result.get_candidate_value("supplier_sku") or ocr_result.get_candidate_value("sku")
+            if cand_sku:
+                extracted_sku = str(cand_sku).strip()
 
         assign_hash = cls.compute_assignment_hash(
             image_id=finding.image.image_id,
@@ -99,6 +115,7 @@ class ImageManifestEntry(BaseModel):
             catalog_name=finding.matched_catalog_name,
             proposed_product_id=finding.matched_product_id,
             proposed_variant_code=finding.matched_variant_code,
+            image_sku=extracted_sku,
             match_status=finding.status,
             match_strategy=finding.match_strategy,
             confidence=finding.confidence,
@@ -161,13 +178,22 @@ class ImageApprovalManifest(BaseModel):
     def approve(
         self,
         image_id: str,
+        image_sku: Optional[str] = None,
+        detected_color: Optional[str] = None,
+        color_evidence: Optional[dict[str, Any]] = None,
         approved_by: str = "reviewer",
         notes: Optional[str] = None,
     ) -> bool:
-        """Approve an image assignment explicitly."""
+        """Approve an image assignment explicitly with optional verified image_sku and color analysis."""
         entry = self.get_entry(image_id)
         if not entry or not entry.proposed_variant_code:
             return False
+        if image_sku:
+            entry.image_sku = image_sku
+        if detected_color:
+            entry.detected_color = detected_color
+        if color_evidence:
+            entry.color_evidence = color_evidence
         entry.approval_status = ApprovalStatus.APPROVED
         entry.approved_by = approved_by
         entry.approved_at = datetime.now(timezone.utc).isoformat()

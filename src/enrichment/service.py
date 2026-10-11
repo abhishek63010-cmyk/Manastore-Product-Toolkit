@@ -1,5 +1,8 @@
+from pathlib import Path
 from typing import Any, Optional
 
+from src.images.color import ImageColorAnalyzer, ImageColorResult
+from src.images.inventory import ImageInventory
 from src.images.manifest import ApprovalStatus, ImageApprovalManifest, ImageManifestEntry
 from src.images.uploader import ImageUploadSummary
 from src.models.product import Product
@@ -12,9 +15,10 @@ class ProductEnrichmentService:
     """
     Service responsible for enriching canonical products with:
     1. Verified approved image metadata from ImageApprovalManifest.
-    2. Non-destructive provisional OCR candidates extracted from approved images.
-    3. Confirmed Blob storage upload URLs.
-    4. Review required flags and discrepancy diagnostics.
+    2. Identifiable image SKU resolution and pixel color extraction.
+    3. Non-destructive provisional OCR candidates extracted from approved images.
+    4. Confirmed Blob storage upload URLs (when present).
+    5. Review required flags and discrepancy diagnostics.
     """
 
     @classmethod
@@ -25,6 +29,7 @@ class ProductEnrichmentService:
         ocr_results: Optional[list[OCRResult]] = None,
         upload_summary: Optional[ImageUploadSummary] = None,
         validation_report: Optional[ValidationReport] = None,
+        image_inventory: Optional[ImageInventory] = None,
     ) -> RefinedExport:
         records: list[RefinedVariantRecord] = []
 
@@ -66,6 +71,7 @@ class ProductEnrichmentService:
                     ocr_map=ocr_map,
                     val_errors=val_errors,
                     val_warnings=val_warnings,
+                    image_inventory=image_inventory,
                 )
                 records.append(record)
 
@@ -94,6 +100,7 @@ class ProductEnrichmentService:
         ocr_map: dict[str, OCRResult],
         val_errors: dict[str, list[str]],
         val_warnings: dict[str, list[str]],
+        image_inventory: Optional[ImageInventory] = None,
     ) -> RefinedVariantRecord:
         review_reasons: list[str] = []
         requires_review = False
@@ -241,7 +248,119 @@ class ProductEnrichmentService:
                         f"Color discrepancy: supplier has '{var.color}' vs OCR candidate '{candidate_color}'"
                     )
 
-        # Blob Upload Status
+        # -------------------------------------------------------------
+        # Approved Image Enrichment: Image SKU & Pixel Color Analysis
+        # -------------------------------------------------------------
+        enriched_image_sku: Optional[str] = None
+        enriched_color: Optional[str] = None
+        image_color_status: str = "NOT_ANALYZED"
+        image_color_confidence: Optional[float] = None
+        image_color_hex: Optional[str] = None
+        image_color_notes: Optional[str] = None
+
+        if approved_entry:
+            # 1. Resolve image_sku following strict precedence:
+            #   (a) Explicit user assignment in entry (entry.image_sku)
+            #   (b) OCR candidate SKU from printed text on the approved image
+            #   (c) Leave empty if unavailable; never fabricate
+            if approved_entry.image_sku and approved_entry.image_sku.strip():
+                enriched_image_sku = approved_entry.image_sku.strip()
+            elif candidate_sku and candidate_sku.strip():
+                enriched_image_sku = candidate_sku.strip()
+            else:
+                enriched_image_sku = None
+                requires_review = True
+                review_reasons.append(
+                    f"Image SKU missing for approved image '{approved_entry.original_filename}'; required for publication"
+                )
+
+            # 2. Analyze pixel color from the approved image
+            color_result: Optional[ImageColorResult] = None
+
+            # 2.1 Check if entry already has recorded color evidence
+            if approved_entry.detected_color:
+                ev = approved_entry.color_evidence or {}
+                color_result = ImageColorResult(
+                    status="EXTRACTED",
+                    canonical_color=approved_entry.detected_color,
+                    confidence=ev.get("confidence", 0.8),
+                    hex_code=ev.get("hex_code"),
+                    is_ambiguous=False,
+                    notes=ev.get("notes", "Pre-analyzed image color from manifest"),
+                )
+            else:
+                # 2.2 Attempt to load image data and run ImageColorAnalyzer
+                img_data_to_analyze = None
+                # Try image_path as absolute file or relative to working directory
+                if approved_entry.image_path and Path(approved_entry.image_path).is_file():
+                    img_data_to_analyze = approved_entry.image_path
+                elif image_inventory:
+                    disc_img = image_inventory.get_image(approved_entry.image_id) or image_inventory.get_image(approved_entry.original_filename)
+                    if disc_img:
+                        img_bytes = disc_img.read_bytes()
+                        if img_bytes:
+                            img_data_to_analyze = img_bytes
+                        elif disc_img.local_path and Path(disc_img.local_path).is_file():
+                            img_data_to_analyze = disc_img.local_path
+
+                # Fallback to variant image assets if present
+                if not img_data_to_analyze and var.images:
+                    for asset in var.images:
+                        if asset.image_id == approved_entry.image_id or asset.original_filename == approved_entry.original_filename:
+                            if asset.local_path and Path(asset.local_path).is_file():
+                                img_data_to_analyze = asset.local_path
+                                break
+
+                if img_data_to_analyze:
+                    color_result = ImageColorAnalyzer.analyze_image(img_data_to_analyze)
+                elif approved_entry.color_evidence and approved_entry.color_evidence.get("status"):
+                    ev = approved_entry.color_evidence
+                    color_result = ImageColorResult(
+                        status=ev.get("status", "UNCERTAIN"),
+                        canonical_color=ev.get("canonical_color"),
+                        confidence=ev.get("confidence", 0.0),
+                        hex_code=ev.get("hex_code"),
+                        is_ambiguous=ev.get("is_ambiguous", True),
+                        notes=ev.get("notes"),
+                    )
+
+            if color_result:
+                image_color_status = color_result.status
+                image_color_confidence = color_result.confidence
+                image_color_hex = color_result.hex_code
+                image_color_notes = color_result.notes
+
+                if color_result.status == "EXTRACTED" and not color_result.is_ambiguous and color_result.canonical_color:
+                    enriched_color = color_result.canonical_color
+                    # Cross-check against supplier color if supplier gave a distinct color
+                    if var.color and enriched_color.casefold() != var.color.casefold():
+                        requires_review = True
+                        review_reasons.append(
+                            f"Image color discrepancy: image pixels suggest '{enriched_color}' vs supplier '{var.color}'"
+                        )
+                else:
+                    enriched_color = None
+                    requires_review = True
+                    diag_reason = color_result.notes or f"Image color analysis {color_result.status.lower()}; manual color verification required"
+                    review_reasons.append(diag_reason)
+            else:
+                image_color_status = "NOT_ANALYZED"
+                image_color_notes = "Image file inaccessible for local pixel color analysis"
+                requires_review = True
+                review_reasons.append("Image pixel color could not be analyzed (file not accessible)")
+
+            # Populate exact canonical variant row attributes
+            if enriched_image_sku:
+                var.image_sku = enriched_image_sku
+            if enriched_color:
+                var.color = enriched_color
+        else:
+            # Without approved image, canonical color and image_sku MUST remain empty
+            enriched_image_sku = None
+            enriched_color = None
+            image_color_status = "NOT_ANALYZED"
+
+        # Blob Upload Status (strictly empty if not provided)
         is_uploaded = False
         blob_url = None
         gallery_blob_urls = []
@@ -249,7 +368,6 @@ class ProductEnrichmentService:
         if var.primary_image_url and (
             var.primary_image_url.startswith("https://") or var.primary_image_url.startswith("http://")
         ):
-            # Check if this URL is from blob storage
             if "blob.vercel-storage.com" in var.primary_image_url or "blob" in var.primary_image_url:
                 is_uploaded = True
                 blob_url = var.primary_image_url
@@ -306,6 +424,12 @@ class ProductEnrichmentService:
             approved_by=approved_by,
             approved_at=approved_at,
             assignment_hash=assignment_hash,
+            image_sku=enriched_image_sku,
+            color=enriched_color,
+            image_color_status=image_color_status,
+            image_color_confidence=image_color_confidence,
+            image_color_hex=image_color_hex,
+            image_color_notes=image_color_notes,
             ocr_status=ocr_status,
             ocr_provider=ocr_provider,
             ocr_confidence=ocr_confidence,

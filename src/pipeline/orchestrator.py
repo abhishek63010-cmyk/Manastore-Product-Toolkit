@@ -81,6 +81,7 @@ class PipelineOrchestrator:
             )
 
         # 3. Image Discovery & Deterministic Matching with OCR Assistance
+        inventory = None
         match_report: Optional[ImageMatchReport] = None
         ocr_results = []
         approval_manifest: Optional[ImageApprovalManifest] = None
@@ -163,13 +164,7 @@ class PipelineOrchestrator:
                 f"warnings={len(validation_report.warnings())}"
             )
 
-        # 6. Canonical Export Assembly
-        export_data = CanonicalExport.from_products(
-            products=products,
-            validation_report=validation_report,
-        )
-
-        # 6.5. Refined Product Data Enrichment (Phase 3)
+        # 6. Refined Product Data Enrichment (Phase 3 & Scope Correction)
         from src.enrichment.service import ProductEnrichmentService
         refined_export = ProductEnrichmentService.enrich(
             products=products,
@@ -177,6 +172,7 @@ class PipelineOrchestrator:
             ocr_results=ocr_results,
             upload_summary=upload_summary,
             validation_report=validation_report,
+            image_inventory=inventory,
         )
         if config.verbose:
             print(
@@ -184,6 +180,12 @@ class PipelineOrchestrator:
                 f"({refined_export.approved_image_variants} approved, "
                 f"{refined_export.variants_requiring_review} require review)"
             )
+
+        # 6.5. Canonical Export Assembly (reflects enriched color & image_sku)
+        export_data = CanonicalExport.from_products(
+            products=products,
+            validation_report=validation_report,
+        )
 
         # 7. Output Artifact Writing (if not dry_run)
         output_files: dict[str, str] = {}
