@@ -3,9 +3,12 @@ from typing import Any, Optional
 from zipfile import ZipFile, is_zipfile
 from pydantic import BaseModel, Field
 
+from src.images.manifest import ImageApprovalManifest
 from src.images.matcher import ImageMatchReport, MatchStatus
 from src.models.enums import FieldSource
+from src.models.image import ImageAsset
 from src.models.product import Product
+from src.models.provenance import ProvenanceRecord
 from src.uploaders.base import BaseBlobUploader, UploadResult, UploadStatus
 
 
@@ -52,6 +55,8 @@ class ImageUploadService:
         match_report: ImageMatchReport,
         uploader: BaseBlobUploader,
         prefix: Optional[str] = "products",
+        approval_manifest: Optional[ImageApprovalManifest] = None,
+        require_approval: bool = False,
     ) -> ImageUploadSummary:
         summary = ImageUploadSummary()
 
@@ -61,6 +66,42 @@ class ImageUploadService:
             for f in match_report.findings
             if f.status == MatchStatus.MATCHED
         }
+
+        # If approval manifest is provided, attach any approved entries that might have been reassigned
+        if approval_manifest:
+            var_map = {v.variant_code: v for p in products for v in p.variants}
+            finding_img_map = {f.image.image_id: f.image for f in match_report.findings}
+
+            for entry in approval_manifest.entries:
+                if entry.is_valid_approval() and entry.proposed_variant_code in var_map:
+                    matched_image_ids.add(entry.image_id)
+                    target_v = var_map[entry.proposed_variant_code]
+                    if not any(a.image_id == entry.image_id for a in target_v.images):
+                        disc_img = finding_img_map.get(entry.image_id)
+                        if disc_img:
+                            idx = len(target_v.images)
+                            is_hero = (idx == 0)
+                            asset = ImageAsset(
+                                image_id=disc_img.image_id,
+                                local_path=disc_img.local_path,
+                                supplier_sku=target_v.supplier_sku,
+                                variant_code=target_v.variant_code,
+                                original_filename=disc_img.original_filename,
+                                source_identity=disc_img.source_identity,
+                                sort_index=idx,
+                                is_primary=is_hero,
+                                source_metadata=ProvenanceRecord(
+                                    source_file=disc_img.source_identity,
+                                    supplier_id="manifest_approval",
+                                ),
+                                extra_metadata={
+                                    "file_size_bytes": disc_img.file_size_bytes,
+                                    "file_extension": disc_img.file_extension,
+                                    "relative_path": disc_img.relative_path,
+                                    "approved_by": entry.approved_by,
+                                }
+                            )
+                            target_v.images.append(asset)
 
         # Count skipped non-matched images
         skipped_findings = [
@@ -78,10 +119,17 @@ class ImageUploadService:
                 uploaded_gallery_urls: list[tuple[int, str]] = []
 
                 for asset in variant.images:
-                    # Skip if not part of verified matched set
+                    # Skip if not part of verified matched/approved set
                     if asset.image_id not in matched_image_ids:
                         summary.skipped_count += 1
                         continue
+
+                    # Strict human-review manifest approval gate
+                    if require_approval:
+                        if not approval_manifest or not approval_manifest.is_approved(asset.image_id, variant.variant_code):
+                            # Blocked by strict approval gate: must be explicitly APPROVED with valid hash
+                            summary.skipped_count += 1
+                            continue
 
                     summary.total_attempted += 1
 

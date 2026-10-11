@@ -109,6 +109,26 @@ class DiscoveredImage(BaseModel):
             tokens=tokens,
         )
 
+    def read_bytes(self) -> Optional[bytes]:
+        """Read binary image bytes from filesystem path or source ZIP archive."""
+        if self.local_path:
+            p = Path(self.local_path)
+            if p.exists() and p.is_file():
+                return p.read_bytes()
+
+        if self.source_identity and self.source_type == "ZIP":
+            zip_p = Path(self.source_identity)
+            if zip_p.exists() and is_zipfile(zip_p):
+                rel_member = self.archive_member_path or self.relative_path or self.original_filename
+                with ZipFile(zip_p, "r") as zf:
+                    if rel_member in zf.namelist():
+                        return zf.read(rel_member)
+                    for member_name in zf.namelist():
+                        if Path(member_name).name == self.original_filename:
+                            return zf.read(member_name)
+
+        return None
+
 
 class ImageInventory(BaseModel):
     """
@@ -137,6 +157,18 @@ class ImageInventory(BaseModel):
 
     def __iter__(self):
         return iter(self.images)
+
+    def get_image(self, identifier: str) -> Optional[DiscoveredImage]:
+        """Lookup discovered image by image_id, original_filename, or relative_path."""
+        ident_clean = identifier.strip().casefold()
+        for img in self.images:
+            if (
+                img.image_id.casefold() == ident_clean
+                or img.original_filename.casefold() == ident_clean
+                or img.relative_path.casefold() == ident_clean
+            ):
+                return img
+        return None
 
     @classmethod
     def discover(cls, source_path: Union[str, Path], recursive: bool = True) -> "ImageInventory":

@@ -24,9 +24,8 @@ class Variant(BaseModel):
         min_length=1,
         description="Internal unique variant identifier/SKU (e.g. 'Mahots-K-S3207', 'Rajtex-A-035-A')"
     )
-    supplier_sku: str = Field(
-        ...,
-        min_length=1,
+    supplier_sku: Optional[str] = Field(
+        default=None,
         description="Supplier-assigned SKU (e.g. 'AM-17090'). May be shared across multiple variants"
     )
     variant_name: str = Field(
@@ -94,10 +93,18 @@ class Variant(BaseModel):
         description="Provenance and field tracking metadata for this variant"
     )
 
-    @field_validator("variant_code", "supplier_sku", "variant_name")
+    @field_validator("variant_code", "variant_name")
     @classmethod
-    def strip_whitespace(cls, value: str) -> str:
+    def strip_required_whitespace(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("Field cannot be empty or blank whitespace")
         return cleaned
+
+    @field_validator("supplier_sku")
+    @classmethod
+    def strip_optional_whitespace(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned if cleaned else None

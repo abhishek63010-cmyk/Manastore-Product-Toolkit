@@ -1,7 +1,8 @@
+import re
 from typing import Any
 from src.adapters.base import BaseSupplierAdapter
 from src.extractors.raw_record import RawRecord, RawTabularData
-from src.models.enums import FieldSource
+from src.models.enums import FieldSource, ReviewStatus
 from src.models.product import Product
 from src.models.provenance import ProvenanceRecord
 from src.models.variant import Variant
@@ -36,7 +37,7 @@ class AmraAdapter(BaseSupplierAdapter):
         "category_slug": ["category_slug", "category"],
         "description": ["description", "product_description", "details"],
         "supplier_sku": ["supplier_sku", "sku", "item_code", "product_sku"],
-        "supplier_price": ["supplier_price", "per_unit_price", "single_piece", "cost", "catalogue_price_per_piece"],
+        "supplier_price": ["supplier_price", "per_unit_price", "wholesale_per_unit_price", "wholesale_price", "single_piece", "cost", "catalogue_price_per_piece"],
         "gst_percent": ["gst_percent", "gst", "tax_percent"],
         "moq": ["moq", "single_piece", "minimum_order_qty"],
         "dispatch_location": ["dispatch_location", "dispatch_from", "location"],
@@ -244,12 +245,107 @@ class AmraAdapter(BaseSupplierAdapter):
             source_metadata=prod_prov,
         )
 
+        # Check if single catalog record defines an expected variant count (e.g. Total Designs: 6 Pcs)
+        if len(records) == 1:
+            first_rec = records[0]
+            expected_count = self.find_variant_count(first_rec)
+            k_vname, v_vname = self.find_field_value(first_rec, self.VARIANT_ALIASES["variant_name"])
+            k_sku, v_sku = self.find_field_value(first_rec, self.PRODUCT_ALIASES["supplier_sku"])
+            if (expected_count and expected_count > 1) or (not v_vname and not v_sku):
+                count_to_create = expected_count if (expected_count and expected_count > 0) else 1
+                for v_idx in range(1, count_to_create + 1):
+                    variant = self._build_derived_placeholder_variant(
+                        record=first_rec,
+                        parent=product,
+                        variant_idx=v_idx,
+                        total_expected=count_to_create,
+                        source_file=source_file,
+                    )
+                    product.add_variant(variant)
+                return product
+
         # Build variants for this product
         for idx, rec in enumerate(records, start=1):
             variant = self._build_amra_variant(rec, product, idx, source_file)
             product.add_variant(variant)
 
         return product
+
+    def _build_derived_placeholder_variant(
+        self,
+        record: RawRecord,
+        parent: Product,
+        variant_idx: int,
+        total_expected: int,
+        source_file: str,
+    ) -> Variant:
+        var_prov = ProvenanceRecord(
+            source_file=source_file,
+            supplier_id=self.adapter_name,
+        )
+
+        # Clean base slug for variant code
+        base_slug = re.sub(r"[^\w]+", "-", parent.catalog_name.upper()).strip("-")
+        variant_code = f"{base_slug}-V{variant_idx:02d}"
+        self.record_provenance(
+            var_prov,
+            "variant_code",
+            FieldSource.DERIVED,
+            notes=f"Derived placeholder {variant_idx}/{total_expected} for catalog '{parent.catalog_name}'",
+        )
+
+        # Missing supplier SKU: preserve None, never invent fake SKU
+        k_sku, v_sku = self.find_field_value(record, self.PRODUCT_ALIASES["supplier_sku"])
+        supplier_sku = self.clean_str(v_sku)
+        if k_sku and supplier_sku:
+            self.record_provenance(var_prov, "supplier_sku", FieldSource.SOURCE, k_sku, v_sku)
+        else:
+            self.record_provenance(
+                var_prov,
+                "supplier_sku",
+                FieldSource.MANUAL_REVIEW,
+                notes="Missing in supplier catalog row; not invented",
+            )
+
+        variant_name = f"Design {variant_idx:02d}"
+        self.record_provenance(
+            var_prov,
+            "variant_name",
+            FieldSource.DERIVED,
+            notes=f"Derived design sequence index {variant_idx}",
+        )
+
+        # Wholesale cost from parent
+        supplier_cost = parent.supplier_price
+        if supplier_cost is not None:
+            self.record_provenance(
+                var_prov,
+                "supplier_cost",
+                FieldSource.DERIVED,
+                notes="Preserved from catalogue wholesale price",
+            )
+
+        # Selling price: strictly None (never calculated or invented)
+        self.record_provenance(
+            var_prov,
+            "selling_price",
+            FieldSource.MANUAL_REVIEW,
+            notes="Wholesale single-catalog; retail price must be set during pricing review",
+        )
+
+        return Variant(
+            variant_code=variant_code,
+            supplier_sku=supplier_sku,
+            variant_name=variant_name,
+            color=None,
+            size=parent.get_attribute("size"),
+            supplier_cost=supplier_cost,
+            selling_price=None,
+            stock_quantity=None,
+            publish=False,
+            review_status=ReviewStatus.PENDING,
+            source_metadata=var_prov,
+        )
 
     def _build_amra_variant(
         self,
@@ -265,11 +361,11 @@ class AmraAdapter(BaseSupplierAdapter):
 
         # 1. Supplier SKU (shared across variants in catalog)
         k_sku, v_sku = self.find_field_value(record, self.PRODUCT_ALIASES["supplier_sku"])
-        supplier_sku = self.clean_str(v_sku) or f"AMRA-{record.row_number}"
-        if k_sku:
+        supplier_sku = self.clean_str(v_sku)
+        if k_sku and supplier_sku:
             self.record_provenance(var_prov, "supplier_sku", FieldSource.SOURCE, k_sku, v_sku)
         else:
-            self.record_provenance(var_prov, "supplier_sku", FieldSource.AUTO_FILLED, notes="Fallback row SKU")
+            self.record_provenance(var_prov, "supplier_sku", FieldSource.MANUAL_REVIEW, notes="Missing in row; not invented")
 
         # 2. Image SKU & Variant Code
         k_img_sku, v_img_sku = self.find_field_value(record, self.VARIANT_ALIASES["image_sku"])

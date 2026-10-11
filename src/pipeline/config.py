@@ -35,6 +35,22 @@ class PipelineConfig(BaseModel):
         default="products",
         description="Prefix path for destination keys in blob storage"
     )
+    enable_ocr: bool = Field(
+        default=False,
+        description="Whether to run OCR text extraction on discovered images or documents"
+    )
+    ocr_provider: Optional[str] = Field(
+        default=None,
+        description="Optional OCR provider override ('fake', 'tesseract'). Auto-selected if omitted."
+    )
+    manifest_path: Optional[Path] = Field(
+        default=None,
+        description="Optional path to pre-approved image approval manifest JSON"
+    )
+    require_image_approval: bool = Field(
+        default=False,
+        description="Whether image uploads strictly require explicit human approval in manifest"
+    )
     export_formats: list[str] = Field(
         default_factory=lambda: ["xlsx", "json"],
         description="Output formats to export: 'xlsx', 'json', 'csv'"
@@ -62,7 +78,7 @@ class PipelineConfig(BaseModel):
         description="Enable detailed console output during pipeline run"
     )
 
-    @field_validator("input_path", "output_dir", "images_path", mode="before")
+    @field_validator("input_path", "output_dir", "images_path", "manifest_path", mode="before")
     @classmethod
     def parse_path(cls, v: Union[str, Path, None]) -> Optional[Path]:
         if v is None:

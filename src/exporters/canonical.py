@@ -18,7 +18,7 @@ class CanonicalImage(BaseModel):
 class CanonicalVariant(BaseModel):
     """Canonical MANA Store variant record."""
     variant_code: str = Field(..., description="Unique internal variant code")
-    supplier_sku: str = Field(..., description="Supplier SKU (may repeat across variants)")
+    supplier_sku: Optional[str] = Field(default=None, description="Supplier SKU (may repeat across variants)")
     variant_name: str = Field(..., description="Canonical variant title (NOT 'varient_name')")
     image_sku: Optional[str] = Field(default=None, description="Canonical image SKU (NOT 'image-sku')")
     color: Optional[str] = None

@@ -10,6 +10,7 @@ from src.models.image import ImageAsset
 from src.models.product import Product
 from src.models.provenance import ProvenanceRecord
 from src.models.variant import Variant
+from src.ocr.models import OCRResult
 
 
 class MatchStatus(str, Enum):
@@ -73,6 +74,8 @@ class DeterministicImageMatcher:
     - Guarantees deterministic natural sorting (Index 0 = primary image).
     - Enforces cross-product isolation (generic color names cannot leak across products).
     - Preserves origin provenance for matched, ambiguous, and unmatched images.
+    - Normalizes catalogue names conservatively (e.g. 'Amra' vs 'Amrah').
+    - Leverages provisional OCR candidate fields without silently fabricating product truth.
     """
 
     @classmethod
@@ -81,9 +84,20 @@ class DeterministicImageMatcher:
         products: list[Product],
         inventory: ImageInventory,
         attach_to_variants: bool = True,
+        ocr_results: Optional[list[OCRResult]] = None,
     ) -> ImageMatchReport:
         findings: list[ImageMatchFinding] = []
         variant_matched_images: dict[str, list[DiscoveredImage]] = {}
+
+        # Build OCR lookup map
+        ocr_map: dict[str, OCRResult] = {}
+        if ocr_results:
+            for r in ocr_results:
+                if r.source_filename:
+                    ocr_map[r.source_filename.casefold()] = r
+                if r.source_identity:
+                    ocr_map[r.source_identity.casefold()] = r
+                    ocr_map[Path(r.source_identity).name.casefold()] = r
 
         # Map all variants and products for fast, scoped lookup
         variant_lookup: dict[str, tuple[Product, Variant]] = {}
@@ -96,7 +110,12 @@ class DeterministicImageMatcher:
 
         # Process each discovered image in inventory
         for img in inventory.images:
-            finding = cls._match_single_image(img, products, variant_lookup)
+            img_ocr = (
+                ocr_map.get(img.original_filename.casefold())
+                or ocr_map.get(img.relative_path.casefold())
+                or ocr_map.get(img.image_id.casefold())
+            )
+            finding = cls._match_single_image(img, products, variant_lookup, ocr_result=img_ocr)
             findings.append(finding)
 
             if finding.status == MatchStatus.MATCHED and finding.matched_variant_code:
@@ -193,6 +212,7 @@ class DeterministicImageMatcher:
         img: DiscoveredImage,
         products: list[Product],
         variant_lookup: dict[str, tuple[Product, Variant]],
+        ocr_result: Optional[OCRResult] = None,
     ) -> ImageMatchFinding:
         norm_stem = img.normalized_stem.casefold()
         img_tokens = set(img.tokens)
@@ -255,27 +275,60 @@ class DeterministicImageMatcher:
             prod_group = cls._clean_token(prod.product_group) if prod.product_group else None
             catalog_norm = cls._clean_token(prod.catalog_name)
             clean_rel_path = cls._clean_token(img.relative_path)
+            clean_stem = cls._clean_token(img.normalized_stem)
 
             # Check if this image path/tokens belong to this product scope
             is_product_scope = (
-                (prod_group and prod_group in clean_rel_path)
-                or (catalog_norm and catalog_norm in clean_rel_path)
+                (prod_group and (prod_group in clean_rel_path or prod_group in clean_stem))
+                or (catalog_norm and (catalog_norm in clean_rel_path or catalog_norm in clean_stem))
             )
 
             if is_product_scope:
-                # Find matching variant within this product scope only
+                # Case 2A: Single variant product -> direct unambiguous match
+                if len(prod.variants) == 1:
+                    target_var = prod.variants[0]
+                    return ImageMatchFinding(
+                        image=img,
+                        status=MatchStatus.MATCHED,
+                        matched_product_id=prod.product_id,
+                        matched_catalog_name=prod.catalog_name,
+                        matched_variant_code=target_var.variant_code,
+                        matched_supplier_sku=target_var.supplier_sku,
+                        match_strategy="SCOPED_SINGLE_VARIANT_PRODUCT",
+                        confidence=0.90,
+                        reason=f"Matched single-variant catalogue '{prod.catalog_name}' (variant '{target_var.variant_code}')",
+                    )
+
+                # Case 2B: Multi-variant product: find matching variant within product scope
                 matched_variants: list[Variant] = []
                 for var in prod.variants:
                     color_token = cls._clean_token(var.color) if var.color else None
                     name_token = cls._clean_token(var.variant_name) if var.variant_name else None
+                    code_token = cls._clean_token(var.variant_code) if var.variant_code else None
 
-                    if color_token and color_token in clean_rel_path:
+                    if color_token and (color_token in clean_rel_path or color_token in clean_stem):
                         matched_variants.append(var)
-                    elif name_token and name_token in clean_rel_path:
+                    elif name_token and (name_token in clean_rel_path or name_token in clean_stem):
                         matched_variants.append(var)
+                    elif code_token and (code_token in clean_rel_path or code_token in clean_stem):
+                        matched_variants.append(var)
+
+                # Supplementary OCR evidence within scoped product
+                if not matched_variants and ocr_result and ocr_result.candidate_fields:
+                    for cf in ocr_result.candidate_fields:
+                        c_val = str(cf.candidate_value).strip().casefold()
+                        for var in prod.variants:
+                            v_code = var.variant_code.casefold()
+                            v_sku = var.supplier_sku.casefold() if var.supplier_sku else ""
+                            v_img_sku = var.image_sku.casefold() if var.image_sku else ""
+                            v_name = var.variant_name.casefold() if var.variant_name else ""
+                            if c_val and (c_val == v_code or c_val == v_sku or c_val == v_img_sku or c_val == v_name):
+                                if var not in matched_variants:
+                                    matched_variants.append(var)
 
                 if len(matched_variants) == 1:
                     chosen = matched_variants[0]
+                    strategy = "OCR_CANDIDATE_VARIANT_MATCH" if (not (chosen.color and cls._clean_token(chosen.color) in clean_rel_path) and not (chosen.variant_name and cls._clean_token(chosen.variant_name) in clean_rel_path)) else "SCOPED_PRODUCT_COLOR_TOKEN"
                     return ImageMatchFinding(
                         image=img,
                         status=MatchStatus.MATCHED,
@@ -283,9 +336,9 @@ class DeterministicImageMatcher:
                         matched_catalog_name=prod.catalog_name,
                         matched_variant_code=chosen.variant_code,
                         matched_supplier_sku=chosen.supplier_sku,
-                        match_strategy="SCOPED_PRODUCT_COLOR_TOKEN",
+                        match_strategy=strategy,
                         confidence=0.85,
-                        reason=f"Matched scoped catalog '{prod.catalog_name}' with variant '{chosen.variant_name}'",
+                        reason=f"Matched scoped catalog '{prod.catalog_name}' with variant '{chosen.variant_code}'",
                     )
                 elif len(matched_variants) > 1:
                     return ImageMatchFinding(
@@ -301,6 +354,47 @@ class DeterministicImageMatcher:
                             f"{len(matched_variants)} variants: {[v.variant_code for v in matched_variants]}"
                         ),
                     )
+                else:
+                    # Multi-variant product, belongs to catalog scope, but NO variant-distinguishing tokens found
+                    # Strictly mark AMBIGUOUS requiring human review across all variants
+                    return ImageMatchFinding(
+                        image=img,
+                        status=MatchStatus.AMBIGUOUS,
+                        matched_product_id=prod.product_id,
+                        matched_catalog_name=prod.catalog_name,
+                        candidate_variant_codes=[v.variant_code for v in prod.variants],
+                        match_strategy="SCOPED_MULTI_VARIANT_AMBIGUOUS",
+                        confidence=0.5,
+                        reason=(
+                            f"Image belongs to catalogue '{prod.catalog_name}' ({len(prod.variants)} variants), "
+                            f"but lacks variant-distinguishing tokens"
+                        ),
+                    )
+
+        # -----------------------------------------------------------------
+        # Priority 2.5: OCR Candidate Field Matching (Unscoped)
+        # -----------------------------------------------------------------
+        if ocr_result and ocr_result.candidate_fields:
+            for cf in ocr_result.candidate_fields:
+                c_val = str(cf.candidate_value).strip().casefold()
+                if not c_val:
+                    continue
+                for prod in products:
+                    for var in prod.variants:
+                        v_code = var.variant_code.casefold()
+                        v_img_sku = var.image_sku.casefold() if var.image_sku else ""
+                        if c_val == v_code or (v_img_sku and c_val == v_img_sku):
+                            return ImageMatchFinding(
+                                image=img,
+                                status=MatchStatus.MATCHED,
+                                matched_product_id=prod.product_id,
+                                matched_catalog_name=prod.catalog_name,
+                                matched_variant_code=var.variant_code,
+                                matched_supplier_sku=var.supplier_sku,
+                                match_strategy="OCR_CANDIDATE_EXACT",
+                                confidence=0.85,
+                                reason=f"Matched OCR candidate {cf.field_name} '{cf.candidate_value}' to variant '{var.variant_code}'",
+                            )
 
         # -----------------------------------------------------------------
         # Priority 3: Supplier SKU Match
@@ -308,6 +402,8 @@ class DeterministicImageMatcher:
         sku_candidates: list[tuple[Product, Variant]] = []
         for prod in products:
             for var in prod.variants:
+                if not var.supplier_sku:
+                    continue
                 sku_norm = var.supplier_sku.strip().casefold()
                 if sku_norm in img_tokens or sku_norm in norm_stem:
                     sku_candidates.append((prod, var))
@@ -381,4 +477,7 @@ class DeterministicImageMatcher:
     def _clean_token(s: Optional[str]) -> str:
         if not s:
             return ""
-        return re.sub(r"[^\w]+", "-", s.strip().lower()).strip("-")
+        cleaned = re.sub(r"[^\w]+", "-", s.strip().lower()).strip("-")
+        # Conservative spelling equivalence: amrah -> amra
+        cleaned = re.sub(r"\bamrah\b", "amra", cleaned)
+        return cleaned

@@ -7,6 +7,7 @@ from src.exporters.canonical import CanonicalExport
 from src.exporters.writers import OutputWriter
 from src.extractors.tabular import GenericTabularExtractor
 from src.images.inventory import GenericImageInventory
+from src.images.manifest import ImageApprovalManifest
 from src.images.matcher import DeterministicImageMatcher, ImageMatchReport
 from src.images.uploader import ImageUploadService, ImageUploadSummary
 from src.models.product import Product
@@ -79,8 +80,12 @@ class PipelineOrchestrator:
                 error_message=f"Adapter transformation failed: {str(e)}",
             )
 
-        # 3. Image Discovery & Deterministic Matching
+        # 3. Image Discovery & Deterministic Matching with OCR Assistance
+        inventory = None
         match_report: Optional[ImageMatchReport] = None
+        ocr_results = []
+        approval_manifest: Optional[ImageApprovalManifest] = None
+
         if config.images_path and Path(config.images_path).exists():
             if config.verbose:
                 print(f"[Pipeline] Discovering images in: {config.images_path}")
@@ -88,7 +93,26 @@ class PipelineOrchestrator:
             if config.verbose:
                 print(f"[Pipeline] Discovered {inventory.total_images} image assets")
 
-            match_report = DeterministicImageMatcher.match(products, inventory)
+            # 3.1. Optional OCR Extraction (executed before matching so candidates can assist)
+            if config.enable_ocr:
+                from src.ocr.registry import OCRRegistry
+                ocr_extractor = OCRRegistry.get_extractor(config.ocr_provider)
+                if config.verbose:
+                    print(f"[Pipeline] Running OCR extraction via provider '{ocr_extractor.provider_name}'...")
+                for img in inventory.images:
+                    if img.local_path:
+                        res = ocr_extractor.extract_from_file(img.local_path)
+                        ocr_results.append(res)
+                if config.verbose:
+                    print(f"[Pipeline] OCR extracted {len(ocr_results)} result(s)")
+
+            # 3.2. Deterministic Image Matching with OCR candidate assistance
+            match_report = DeterministicImageMatcher.match(
+                products=products,
+                inventory=inventory,
+                attach_to_variants=True,
+                ocr_results=ocr_results if ocr_results else None,
+            )
             if config.verbose:
                 print(
                     f"[Pipeline] Matched: {match_report.matched_count}, "
@@ -96,7 +120,18 @@ class PipelineOrchestrator:
                     f"Unmatched: {match_report.unmatched_count}"
                 )
 
-        # 4. Optional Image Uploading
+            # 3.3. Human-Review Manifest Initialization or Loading
+            if config.manifest_path and Path(config.manifest_path).exists():
+                if config.verbose:
+                    print(f"[Pipeline] Loading pre-existing manifest from: {config.manifest_path}")
+                approval_manifest = ImageApprovalManifest.load_from_file(config.manifest_path)
+            else:
+                approval_manifest = ImageApprovalManifest.create_from_match_report(
+                    match_report=match_report,
+                    ocr_results=ocr_results,
+                )
+
+        # 4. Optional Image Uploading (Strictly gated by Approval Manifest)
         upload_summary: Optional[ImageUploadSummary] = None
         if config.upload_images and match_report is not None and not config.dry_run:
             active_uploader = uploader or VercelBlobUploader(prefix=config.upload_prefix)
@@ -108,6 +143,8 @@ class PipelineOrchestrator:
                 match_report=match_report,
                 uploader=active_uploader,
                 prefix=config.upload_prefix,
+                approval_manifest=approval_manifest,
+                require_approval=config.require_image_approval,
             )
             if config.verbose:
                 print(
@@ -127,7 +164,24 @@ class PipelineOrchestrator:
                 f"warnings={len(validation_report.warnings())}"
             )
 
-        # 6. Canonical Export Assembly
+        # 6. Refined Product Data Enrichment (Phase 3 & Scope Correction)
+        from src.enrichment.service import ProductEnrichmentService
+        refined_export = ProductEnrichmentService.enrich(
+            products=products,
+            approval_manifest=approval_manifest,
+            ocr_results=ocr_results,
+            upload_summary=upload_summary,
+            validation_report=validation_report,
+            image_inventory=inventory,
+        )
+        if config.verbose:
+            print(
+                f"[Pipeline] Refined data enriched: {refined_export.total_variants} variants "
+                f"({refined_export.approved_image_variants} approved, "
+                f"{refined_export.variants_requiring_review} require review)"
+            )
+
+        # 6.5. Canonical Export Assembly (reflects enriched color & image_sku)
         export_data = CanonicalExport.from_products(
             products=products,
             validation_report=validation_report,
@@ -162,6 +216,20 @@ class PipelineOrchestrator:
                     )
                     output_files["csv"] = str(p)
 
+            # Write Separate Refined Products Workbook (Internal Audit & Enrichment)
+            p_refined = OutputWriter.write_refined_xlsx(
+                refined_data=refined_export,
+                output_path=out_dir / "refined_products.xlsx",
+            )
+            output_files["refined_xlsx"] = str(p_refined)
+
+            # Write Website-Import Ready Workbook (MANA Store Importer Contract)
+            p_mana_import = OutputWriter.write_mana_store_import_xlsx(
+                products=products,
+                output_path=out_dir / "mana_store_import_ready.xlsx",
+            )
+            output_files["mana_store_import_xlsx"] = str(p_mana_import)
+
             if config.generate_report:
                 p_rep_xlsx = OutputWriter.write_validation_report_xlsx(
                     report=validation_report,
@@ -179,6 +247,10 @@ class PipelineOrchestrator:
                 )
                 output_files["validation_report_json"] = str(p_rep_json)
 
+            if approval_manifest:
+                p_manifest = approval_manifest.save_to_file(out_dir / "image_approval_manifest.json")
+                output_files["manifest_json"] = str(p_manifest)
+
         # 8. Compute Metrics & Success Flag
         has_val_errors = validation_report.has_errors
         is_success = True
@@ -188,13 +260,19 @@ class PipelineOrchestrator:
             is_success = False
             error_msg = f"Validation failed with {len(validation_report.errors())} error(s)"
 
+        total_ambiguous = match_report.ambiguous_count if match_report else 0
+        total_approved = sum(1 for e in approval_manifest.entries if e.is_valid_approval()) if approval_manifest else 0
+
         metrics = PipelineMetrics(
             total_source_rows=raw_data.total_rows,
             total_products=export_data.total_products,
             total_variants=export_data.total_variants,
             total_images_discovered=match_report.total_images if match_report else 0,
             total_images_matched=match_report.matched_count if match_report else 0,
+            total_images_ambiguous=total_ambiguous,
+            total_images_approved=total_approved,
             total_images_uploaded=upload_summary.successful_uploads if upload_summary else 0,
+            total_variants_requiring_review=refined_export.variants_requiring_review,
             total_validation_errors=len(validation_report.errors()),
             total_validation_warnings=len(validation_report.warnings()),
             is_valid=validation_report.is_valid,
@@ -210,6 +288,9 @@ class PipelineOrchestrator:
             export_data=export_data,
             validation_report=validation_report,
             match_report=match_report,
+            approval_manifest=approval_manifest,
+            refined_export=refined_export,
             upload_summary=upload_summary,
+            ocr_results=ocr_results,
             error_message=error_msg,
         )
