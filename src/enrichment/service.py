@@ -180,6 +180,17 @@ class ProductEnrichmentService:
             requires_review = True
             review_reasons.append("No approved image assigned")
 
+        # Preserve original supplier facts before any image enrichment
+        original_supplier_color = (
+            getattr(var, "raw_attributes", {}).get("original_color")
+            or getattr(var, "attributes", {}).get("original_color")
+            or var.color
+        )
+        if original_supplier_color and hasattr(var, "raw_attributes"):
+            var.raw_attributes.setdefault("original_color", original_supplier_color)
+        original_supplier_sku = var.supplier_sku
+        original_variant_name = var.variant_name
+
         # OCR Candidate Extraction (ONLY from approved image, NEVER fabricating truth)
         ocr_status = "NOT_RUN"
         ocr_provider = None
@@ -234,18 +245,18 @@ class ProductEnrichmentService:
                 ocr_status = "NOT_RUN"
 
             # Check for conflicting evidence vs original supplier data
-            if candidate_sku and var.supplier_sku:
-                if candidate_sku.casefold() != var.supplier_sku.casefold():
+            if candidate_sku and original_supplier_sku:
+                if candidate_sku.casefold() != original_supplier_sku.casefold():
                     requires_review = True
                     review_reasons.append(
-                        f"SKU discrepancy: supplier has '{var.supplier_sku}' vs OCR candidate '{candidate_sku}'"
+                        f"SKU discrepancy: supplier has '{original_supplier_sku}' vs OCR candidate '{candidate_sku}'"
                     )
 
-            if candidate_color and var.color:
-                if candidate_color.casefold() != var.color.casefold():
+            if candidate_color and original_supplier_color:
+                if candidate_color.casefold() != original_supplier_color.casefold():
                     requires_review = True
                     review_reasons.append(
-                        f"Color discrepancy: supplier has '{var.color}' vs OCR candidate '{candidate_color}'"
+                        f"Color discrepancy: supplier has '{original_supplier_color}' vs OCR candidate '{candidate_color}'"
                     )
 
         # -------------------------------------------------------------
@@ -333,10 +344,10 @@ class ProductEnrichmentService:
                 if color_result.status == "EXTRACTED" and not color_result.is_ambiguous and color_result.canonical_color:
                     enriched_color = color_result.canonical_color
                     # Cross-check against supplier color if supplier gave a distinct color
-                    if var.color and enriched_color.casefold() != var.color.casefold():
+                    if original_supplier_color and enriched_color.casefold() != original_supplier_color.casefold():
                         requires_review = True
                         review_reasons.append(
-                            f"Image color discrepancy: image pixels suggest '{enriched_color}' vs supplier '{var.color}'"
+                            f"Image color discrepancy: image pixels suggest '{enriched_color}' vs supplier '{original_supplier_color}'"
                         )
                 else:
                     enriched_color = None
@@ -349,16 +360,19 @@ class ProductEnrichmentService:
                 requires_review = True
                 review_reasons.append("Image pixel color could not be analyzed (file not accessible)")
 
-            # Populate exact canonical variant row attributes
-            if enriched_image_sku:
-                var.image_sku = enriched_image_sku
-            if enriched_color:
-                var.color = enriched_color
+            # Populate exact canonical variant row attributes from approved image
+            var.image_sku = enriched_image_sku
+            var.color = enriched_color
         else:
             # Without approved image, canonical color and image_sku MUST remain empty
             enriched_image_sku = None
             enriched_color = None
             image_color_status = "NOT_ANALYZED"
+            var.image_sku = None
+            var.color = None
+
+        # Preserve variant name without mutation
+        var.variant_name = original_variant_name
 
         # Blob Upload Status (strictly empty if not provided)
         is_uploaded = False
@@ -406,9 +420,9 @@ class ProductEnrichmentService:
             product_type=prod.product_type,
             category_slug=prod.category_slug or "sarees",
             variant_code=var.variant_code,
-            variant_name=var.variant_name,
-            supplier_sku=var.supplier_sku,
-            original_color=var.color,
+            variant_name=original_variant_name,
+            supplier_sku=original_supplier_sku,
+            original_color=original_supplier_color,
             original_size=var.size,
             supplier_price=prod.supplier_price,
             supplier_cost=var.supplier_cost,
