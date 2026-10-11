@@ -464,6 +464,8 @@ class AmraAdapter(BaseSupplierAdapter):
             for orig_k, orig_v in record.data.items()
             if self.normalize_key(orig_k) not in mapped_keys and orig_v is not None
         }
+        if color:
+            var_raw_attributes["original_color"] = color
 
         return Variant(
             variant_code=variant_code,
