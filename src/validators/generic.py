@@ -31,6 +31,15 @@ class GenericProductValidator:
             total_variants=sum(len(p.variants) for p in products),
         )
 
+        if not products:
+            report.add_issue(
+                severity=ValidationSeverity.ERROR,
+                code="NO_PRODUCTS",
+                message="No processable products found in dataset",
+                field="products",
+            )
+            return report
+
         global_variant_codes: dict[str, str] = {}  # code.lower() -> product_id
 
         for p_idx, prod in enumerate(products, start=1):
@@ -199,6 +208,16 @@ class GenericProductValidator:
                 field="variant_name",
                 variant_code=v_code,
                 supplier_sku=v_sku,
+            )
+
+        # Supplier SKU Warning if absent
+        if not variant.supplier_sku or not variant.supplier_sku.strip():
+            report.add_issue(
+                severity=ValidationSeverity.WARNING,
+                code="MISSING_SUPPLIER_SKU",
+                message=f"Variant '{v_code}' has no supplier_sku defined",
+                field="supplier_sku",
+                variant_code=v_code,
             )
 
         # Stock Non-Negativity

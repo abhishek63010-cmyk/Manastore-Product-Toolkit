@@ -98,11 +98,13 @@ class ImageColorAnalyzer:
                 notes="Image dimensions too small for reliable color analysis",
             )
 
-        # 1. Take central crop to focus on the fabric / saree body and reduce studio borders
+        # 1. Take central / fabric-focused crop to focus on the saree body and reduce studio borders
         cw = int(width * crop_center_ratio)
         ch = int(height * crop_center_ratio)
         left = (width - cw) // 2
-        top = (height - ch) // 2
+        # Position slightly lower in vertical frame where model's skirt/drape hangs
+        top = int(height * 0.30) if height > 100 else (height - ch) // 2
+        top = min(top, height - ch)
         cropped = img.crop((left, top, left + cw, top + ch))
 
         # Downsample for fast clustering and noise reduction
@@ -111,8 +113,7 @@ class ImageColorAnalyzer:
 
         pixels = arr.reshape(-1, 3)  # Shape: (10000, 3)
 
-        # 2. Convert to HSV
-        # Vectorized RGB to HSV
+        # 2. Vectorized RGB to HSV
         r = pixels[:, 0]
         g = pixels[:, 1]
         b = pixels[:, 2]
@@ -134,17 +135,19 @@ class ImageColorAnalyzer:
         h[idx_r] = ((g[idx_r] - b[idx_r]) / delta[idx_r]) % 6.0
 
         # Green is max
-        idx_g = (maxc == g) & nonzero_delta
+        idx_g = (maxc == g) & (maxc != r) & nonzero_delta
         h[idx_g] = ((b[idx_g] - r[idx_g]) / delta[idx_g]) + 2.0
 
         # Blue is max
-        idx_b = (maxc == b) & nonzero_delta
+        idx_b = (maxc == b) & (maxc != r) & (maxc != g) & nonzero_delta
         h[idx_b] = ((r[idx_b] - g[idx_b]) / delta[idx_b]) + 4.0
 
         h = h * 60.0  # degrees [0, 360]
 
-        # 3. Filter out non-informative background (blown out white studio backgrounds or dark shadows)
-        valid_mask = (v >= min_value) & (v <= max_value)
+        # 3. Filter out non-informative background (blown out studio lights, dark shadows, pale studio backdrops/walls)
+        # Studio backdrops in product shoots are frequently pale beige/taupe with low saturation and moderate-to-high brightness
+        is_pale_backdrop = (s < 0.28) & (v > 0.48) & (h >= 18.0) & (h <= 55.0)
+        valid_mask = (v >= min_value) & (v <= max_value) & (~is_pale_backdrop)
         # Saturated color pixels
         color_mask = valid_mask & (s >= min_saturation)
 
@@ -182,8 +185,28 @@ class ImageColorAnalyzer:
         filtered_v = v[color_mask]
         filtered_rgb = pixels[color_mask]
 
-        # Classify each pixel into standard color bucket
+        # Chromatic family grouping map
+        family_map = {
+            "Red": "Red/Maroon",
+            "Maroon": "Red/Maroon",
+            "Rust": "Rust/Orange",
+            "Orange": "Rust/Orange",
+            "Brown": "Rust/Orange",
+            "Navy Blue": "Blue/Navy Blue",
+            "Blue": "Blue/Navy Blue",
+            "Teal": "Teal",
+            "Green": "Green",
+            "Olive": "Green",
+            "Yellow": "Yellow/Mustard",
+            "Mustard": "Yellow/Mustard",
+            "Purple": "Purple/Pink",
+            "Magenta": "Purple/Pink",
+            "Pink": "Purple/Pink",
+        }
+
+        # Classify each pixel into standard color bucket and chromatic family
         votes: dict[str, list[int]] = {}
+        family_votes: dict[str, list[int]] = {}
         for i in range(len(filtered_h)):
             px_h = filtered_h[i]
             px_s = filtered_s[i]
@@ -191,8 +214,10 @@ class ImageColorAnalyzer:
             c_name = cls._classify_hsv(px_h, px_s, px_v)
             if c_name:
                 votes.setdefault(c_name, []).append(i)
+                fam = family_map.get(c_name, c_name)
+                family_votes.setdefault(fam, []).append(i)
 
-        if not votes:
+        if not family_votes:
             return ImageColorResult(
                 status="UNCERTAIN",
                 is_ambiguous=True,
@@ -200,42 +225,50 @@ class ImageColorAnalyzer:
                 notes="Chromatic pixels did not cluster into standard palette",
             )
 
-        # Rank candidate colors by pixel percentage
+        # Rank chromatic families by pixel percentage
         total_valid = len(filtered_h)
-        sorted_candidates = sorted(
-            [(c, len(indices) / total_valid, indices) for c, indices in votes.items()],
+        sorted_families = sorted(
+            [(fam, len(indices) / total_valid, indices) for fam, indices in family_votes.items()],
             key=lambda x: x[1],
             reverse=True,
         )
 
-        top_color, top_ratio, top_indices = sorted_candidates[0]
+        top_fam, top_fam_ratio, top_fam_indices = sorted_families[0]
 
         # Check for multi-colored / distracting multi-tonal image
-        # If top color does not command at least 40% of foreground palette, or second color is very close
-        if len(sorted_candidates) > 1:
-            second_color, second_ratio, _ = sorted_candidates[1]
-            if top_ratio < 0.40 or (top_ratio - second_ratio) < 0.15:
+        # If top family does not command at least 35% of foreground palette, or second family is very close (< 0.15 diff)
+        if len(sorted_families) > 1:
+            second_fam, second_fam_ratio, _ = sorted_families[1]
+            if top_fam_ratio < 0.35 or (top_fam_ratio - second_fam_ratio) < 0.15:
                 return ImageColorResult(
                     status="UNCERTAIN",
                     is_ambiguous=True,
-                    confidence=float(round(top_ratio, 2)),
-                    notes=f"Multi-tonal image: '{top_color}' ({int(top_ratio*100)}%) vs '{second_color}' ({int(second_ratio*100)}%); requires manual review",
+                    confidence=float(round(top_fam_ratio, 2)),
+                    notes=f"Multi-tonal image: '{top_fam}' ({int(top_fam_ratio*100)}%) vs '{second_fam}' ({int(second_fam_ratio*100)}%); requires manual review",
                 )
-        elif top_ratio < 0.35:
+        elif top_fam_ratio < 0.35:
             return ImageColorResult(
                 status="UNCERTAIN",
                 is_ambiguous=True,
-                confidence=float(round(top_ratio, 2)),
-                notes=f"Low dominant color confidence ({int(top_ratio*100)}%); requires manual review",
+                confidence=float(round(top_fam_ratio, 2)),
+                notes=f"Low dominant color confidence ({int(top_fam_ratio*100)}%); requires manual review",
             )
 
+        # Find most prominent specific color within the winning family
+        fam_specific_colors = sorted(
+            [(c, len(indices), indices) for c, indices in votes.items() if family_map.get(c, c) == top_fam],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        top_color, _, specific_indices = fam_specific_colors[0]
+
         # Compute representative RGB
-        selected_rgb = filtered_rgb[top_indices]
+        selected_rgb = filtered_rgb[specific_indices]
         mean_rgb = np.mean(selected_rgb, axis=0) * 255.0
         rgb_tuple = (int(mean_rgb[0]), int(mean_rgb[1]), int(mean_rgb[2]))
         hex_str = f"#{rgb_tuple[0]:02x}{rgb_tuple[1]:02x}{rgb_tuple[2]:02x}"
 
-        confidence = float(min(1.0, round(top_ratio * 1.2, 2)))
+        confidence = float(min(1.0, round(top_fam_ratio * 1.2, 2)))
 
         return ImageColorResult(
             status="EXTRACTED",
@@ -244,7 +277,7 @@ class ImageColorAnalyzer:
             hex_code=hex_str,
             confidence=confidence,
             is_ambiguous=False,
-            notes=f"Dominant color '{top_color}' accounts for {int(top_ratio*100)}% of foreground palette",
+            notes=f"Dominant color '{top_color}' accounts for {int(top_fam_ratio*100)}% of foreground palette",
         )
 
     @classmethod
@@ -255,24 +288,24 @@ class ImageColorAnalyzer:
             if v < 0.40 and s > 0.40:
                 return "Maroon"
             return "Red"
-        if 15 < h <= 42:
-            if v < 0.50 and s < 0.70:
-                return "Brown" if s > 0.30 else "Rust"
+        if 15 < h <= 45:
+            if v < 0.55:
+                return "Rust" if s >= 0.25 else "Brown"
             return "Orange"
-        if 42 < h <= 68:
+        if 45 < h <= 70:
             if s > 0.30:
                 if v < 0.65 and h < 55:
                     return "Mustard"
                 return "Yellow"
             return "Beige"
-        if 68 < h <= 85:
+        if 70 < h <= 85:
             return "Olive"
         if 85 < h <= 165:
             return "Green"
         if 165 < h <= 195:
             return "Teal"
         if 195 < h <= 255:
-            if v < 0.45:
+            if v < 0.50:
                 return "Navy Blue"
             return "Blue"
         if 255 < h <= 295:

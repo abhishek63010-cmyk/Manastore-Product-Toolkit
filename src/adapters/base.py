@@ -174,12 +174,108 @@ class BaseSupplierAdapter(ABC):
         return None
 
     @classmethod
-    def find_variant_count(cls, record: RawRecord) -> Optional[int]:
-        """Inspect a RawRecord for any variant count indicator."""
+    def find_variant_count(cls, record: RawRecord) -> tuple[Optional[str], Any, Optional[int]]:
+        """
+        Search for variant count field in record data.
+        Returns (matched_key, raw_value, parsed_count).
+        """
         for alias in cls.VARIANT_COUNT_ALIASES:
-            _, val = cls.find_field_value(record, [alias])
-            if val is not None:
-                parsed = cls.parse_variant_count(val)
-                if parsed and parsed > 0:
-                    return parsed
-        return None
+            k, v = cls.find_field_value(record, [alias])
+            if k is not None:
+                parsed = cls.parse_variant_count(v)
+                if parsed is not None:
+                    return k, v, parsed
+        return None, None, None
+
+    @classmethod
+    def build_derived_placeholder_variant(
+        cls,
+        record: RawRecord,
+        parent: Product,
+        variant_idx: int,
+        total_expected: int,
+        source_field: Optional[str] = None,
+        source_raw_value: Optional[Any] = None,
+        source_file: str = "",
+        supplier_sku: Optional[str] = None,
+        unmapped_keys: Optional[set[str]] = None,
+    ) -> Any:
+        """
+        Build a deterministic placeholder variant when a catalogue row specifies a variant count
+        without individual variant rows / color specifications.
+        """
+        from src.models.variant import Variant
+
+        var_prov = ProvenanceRecord(
+            source_file=source_file,
+            supplier_id=cls.adapter_name,
+        )
+
+        # 1. Deterministic variant code
+        raw_prefix = parent.product_group or supplier_sku or parent.catalog_name
+        clean_prefix = re.sub(r"[^\w\-]+", "-", str(raw_prefix).strip()).strip("-").upper()
+        if not clean_prefix:
+            clean_prefix = f"PROD-{variant_idx:02d}"
+
+        variant_code = f"{clean_prefix}-V{variant_idx:02d}"
+        cls.record_provenance(
+            var_prov,
+            "variant_code",
+            FieldSource.DERIVED,
+            raw_key=source_field,
+            raw_value=str(source_raw_value) if source_raw_value is not None else None,
+            notes=f"Derived placeholder variant {variant_idx}/{total_expected} from {source_field or 'catalog'} count",
+        )
+
+        # 2. Variant Name (placeholder title - NO invented colors!)
+        variant_name = f"Design {variant_idx:02d}"
+        cls.record_provenance(
+            var_prov,
+            "variant_name",
+            FieldSource.AUTO_FILLED,
+            notes=f"Placeholder design title {variant_idx}/{total_expected}; pending supplier color/design specification",
+        )
+
+        # 3. Supplier SKU (None if absent - DO NOT invent!)
+        if supplier_sku:
+            cls.record_provenance(var_prov, "supplier_sku", FieldSource.SOURCE, notes="Supplier SKU from catalog row")
+        else:
+            cls.record_provenance(var_prov, "supplier_sku", FieldSource.MANUAL_REVIEW, notes="Supplier SKU absent in catalog row")
+
+        # 4. Supplier cost & selling price
+        supplier_cost = parent.supplier_price
+        if supplier_cost is not None:
+            cls.record_provenance(var_prov, "supplier_cost", FieldSource.DERIVED, notes="Copied from parent catalog wholesale price")
+
+        cls.record_provenance(
+            var_prov,
+            "selling_price",
+            FieldSource.MANUAL_REVIEW,
+            notes="Selling price unset; requires pricing configuration",
+        )
+
+        # 5. Extract size if present in parent attributes
+        size = parent.get_attribute("size")
+        if size:
+            cls.record_provenance(var_prov, "size", FieldSource.DERIVED, notes="Inherited from catalog size attribute")
+
+        # 6. Unmapped raw attributes for this record
+        var_raw_attributes = {}
+        if unmapped_keys is not None:
+            for orig_k, orig_v in record.data.items():
+                if cls.normalize_key(orig_k) not in unmapped_keys and orig_v is not None:
+                    var_raw_attributes[orig_k] = orig_v
+
+        return Variant(
+            variant_code=variant_code,
+            supplier_sku=supplier_sku,
+            variant_name=variant_name,
+            color=None,
+            size=size,
+            supplier_cost=supplier_cost,
+            selling_price=None,
+            stock_quantity=None,
+            publish=False,
+            raw_attributes=var_raw_attributes,
+            source_metadata=var_prov,
+        )

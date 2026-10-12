@@ -461,12 +461,12 @@ def test_three_catalogue_benchmark_phase3_enrichment(tmp_path: Path):
     assert res1.success is True
     assert res1.metrics.total_products == 3
     assert res1.metrics.total_variants == 8
-    assert (out_dir / "refined_products.xlsx").exists()
-    assert (out_dir / "mana_store_import_ready.xlsx").exists()
-    assert (out_dir / "image_approval_manifest.json").exists()
+    assert (out_dir / "_internal" / "refined_products.xlsx").exists()
+    assert (out_dir / "_internal" / "mana_store_import_ready.xlsx").exists()
+    assert (out_dir / "_internal" / "image_approval_manifest.json").exists()
 
     # Load initial manifest: all 8 entries start PENDING
-    manifest1 = ImageApprovalManifest.load_from_file(out_dir / "image_approval_manifest.json")
+    manifest1 = ImageApprovalManifest.load_from_file(out_dir / "_internal" / "image_approval_manifest.json")
     assert manifest1.summary()["pending_approval_count"] == 8
 
     # Now simulate human review: Approve the 2 single-variant matched images
@@ -499,8 +499,8 @@ def test_three_catalogue_benchmark_phase3_enrichment(tmp_path: Path):
     assert res2.metrics.total_images_uploaded == 2  # Exactly the 2 approved images uploaded!
     assert res2.upload_summary.successful_uploads == 2
 
-    # Verify mana_store_import_ready.xlsx has Blob URLs for the 2 approved variants ONLY
-    df_mana = pd.read_excel(out_dir2 / "mana_store_import_ready.xlsx", sheet_name="Import Ready")
+    # Verify mana_store_import_ready.xlsx in _internal/ has Blob URLs for the 2 approved variants ONLY
+    df_mana = pd.read_excel(out_dir2 / "_internal" / "mana_store_import_ready.xlsx", sheet_name="Import Ready")
     assert len(df_mana) == 8
 
     # Filter rows by catalogue

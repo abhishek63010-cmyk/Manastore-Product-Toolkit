@@ -49,15 +49,26 @@ class PipelineOrchestrator:
 
         # 1. Extraction
         try:
-            raw_data = GenericTabularExtractor.extract(
-                file_path=config.input_path,
-                sheet_name=config.sheet_name,
-            )
+            from src.extractors.image import ImageCatalogueExtractor
+            input_p = Path(config.input_path)
+            if ImageCatalogueExtractor.is_supported(input_p):
+                if config.verbose:
+                    print(f"[Pipeline] Processing catalogue document via OCR/parser: '{input_p.name}'")
+                raw_data = ImageCatalogueExtractor.extract(
+                    file_path=input_p,
+                    ocr_provider=config.ocr_provider,
+                )
+            else:
+                raw_data = GenericTabularExtractor.extract(
+                    file_path=config.input_path,
+                    sheet_name=config.sheet_name,
+                )
             if config.verbose:
                 print(f"[Pipeline] Extracted {raw_data.total_rows} rows from '{raw_data.source_file}'")
         except Exception as e:
             return PipelineResult(
                 success=False,
+                metrics=PipelineMetrics(is_valid=False, success=False),
                 error_message=f"Extraction failed: {str(e)}",
             )
 
@@ -77,6 +88,7 @@ class PipelineOrchestrator:
         except Exception as e:
             return PipelineResult(
                 success=False,
+                metrics=PipelineMetrics(is_valid=False, success=False),
                 error_message=f"Adapter transformation failed: {str(e)}",
             )
 
@@ -190,50 +202,71 @@ class PipelineOrchestrator:
         # 7. Output Artifact Writing (if not dry_run)
         output_files: dict[str, str] = {}
         if not config.dry_run:
-            out_dir = Path(config.output_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
+            from src.pipeline.output_manager import OutputManager
+            out_mgr = OutputManager(config.output_dir)
+            out_mgr.ensure_directories()
 
+            # 7.1. Single Final Admin-Import Workbook placed at Run Root
+            p_amra_ready = OutputWriter.write_amra_import_xlsx(
+                products=products,
+                output_path=out_mgr.final_amra_workbook_path,
+                images_path=config.images_path,
+            )
+            output_files["amra_data_ready_xlsx"] = str(p_amra_ready)
+
+            # 7.2. Supporting Canonical Data & Internal Artifacts saved in _internal/
             for fmt in config.export_formats:
                 fmt_clean = fmt.lower().strip()
                 if fmt_clean == "xlsx":
                     p = OutputWriter.write_canonical_xlsx(
                         export_data=export_data,
-                        output_path=out_dir / "canonical_products.xlsx",
+                        output_path=out_mgr.canonical_xlsx_path,
                         max_gallery_columns=config.max_gallery_columns,
                     )
                     output_files["xlsx"] = str(p)
                 elif fmt_clean == "json":
                     p = OutputWriter.write_canonical_json(
                         export_data=export_data,
-                        output_path=out_dir / "canonical_products.json",
+                        output_path=out_mgr.canonical_json_path,
                     )
                     output_files["json"] = str(p)
                 elif fmt_clean == "csv":
                     p = OutputWriter.write_canonical_csv(
                         export_data=export_data,
-                        output_path=out_dir / "canonical_products.csv",
+                        output_path=out_mgr.canonical_csv_path,
                         max_gallery_columns=config.max_gallery_columns,
                     )
                     output_files["csv"] = str(p)
 
-            # Write Separate Refined Products Workbook (Internal Audit & Enrichment)
+            # Write Raw Extracted TSV in _internal/ for traceability
+            p_raw_tsv = out_mgr.write_raw_extracted_tsv(raw_data)
+            if p_raw_tsv:
+                output_files["raw_extracted_tsv"] = str(p_raw_tsv)
+
+            # Write Separate Refined Products Workbook in _internal/
             p_refined = OutputWriter.write_refined_xlsx(
                 refined_data=refined_export,
-                output_path=out_dir / "refined_products.xlsx",
+                output_path=out_mgr.refined_xlsx_path,
             )
             output_files["refined_xlsx"] = str(p_refined)
 
-            # Write Website-Import Ready Workbook (MANA Store Importer Contract)
+            # Write Website-Import Ready Workbook in _internal/
             p_mana_import = OutputWriter.write_mana_store_import_xlsx(
                 products=products,
-                output_path=out_dir / "mana_store_import_ready.xlsx",
+                output_path=out_mgr.mana_store_import_xlsx_path,
             )
             output_files["mana_store_import_xlsx"] = str(p_mana_import)
 
+            # Write Image Approval Manifest in _internal/
+            if approval_manifest:
+                p_manifest = approval_manifest.save_to_file(out_mgr.manifest_json_path)
+                output_files["manifest_json"] = str(p_manifest)
+
+            # 7.3. Diagnostics, Audit & Reports saved in _reports/
             if config.generate_report:
                 p_rep_xlsx = OutputWriter.write_validation_report_xlsx(
                     report=validation_report,
-                    output_path=out_dir / "validation_report.xlsx",
+                    output_path=out_mgr.validation_report_xlsx_path,
                     match_report=match_report,
                     upload_results=upload_summary.results if upload_summary else None,
                 )
@@ -241,15 +274,22 @@ class PipelineOrchestrator:
 
                 p_rep_json = OutputWriter.write_validation_report_json(
                     report=validation_report,
-                    output_path=out_dir / "validation_report.json",
+                    output_path=out_mgr.validation_report_json_path,
                     match_report=match_report,
                     upload_results=upload_summary.results if upload_summary else None,
                 )
                 output_files["validation_report_json"] = str(p_rep_json)
 
-            if approval_manifest:
-                p_manifest = approval_manifest.save_to_file(out_dir / "image_approval_manifest.json")
-                output_files["manifest_json"] = str(p_manifest)
+            # 7.4. RUN_SUMMARY.txt at Run Root
+            val_stat = "FAILED" if validation_report.has_errors else "PASSED"
+            total_vars = sum(len(p.variants) for p in products)
+            p_summary = out_mgr.write_run_summary(
+                adapter_used=adapter.adapter_name if 'adapter' in locals() else "unknown",
+                total_products=len(products),
+                total_variants=total_vars,
+                validation_status=val_stat,
+            )
+            output_files["run_summary_txt"] = str(p_summary)
 
         # 8. Compute Metrics & Success Flag
         has_val_errors = validation_report.has_errors

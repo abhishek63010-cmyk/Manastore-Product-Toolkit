@@ -31,11 +31,15 @@ class GenericTabularAdapter(BaseSupplierAdapter):
         "category_slug": ["category_slug", "category", "slug"],
         "description": ["description", "details", "product_description", "summary"],
         "supplier_sku": ["supplier_sku", "sku", "item_code", "product_code", "style_code", "code", "model"],
-        "supplier_price": ["supplier_price", "cost", "supplier_cost", "wholesale_price", "unit_cost", "purchase_price"],
+        "supplier_price": ["supplier_price", "per_unit_price", "unit_price", "cost", "supplier_cost", "unit_cost", "purchase_price"],
+        "wholesale_price": ["wholesale_price", "wholesale_per_unit_price", "ws_price", "wholesale_rate"],
+        "full_catalogue_price": ["full_catalogue_price", "full_catalog_price", "catalogue_price", "catalog_price"],
+        "single_piece_price": ["single_piece_price", "single_piece", "single_price", "single_rate"],
         "gst_percent": ["gst", "gst_percent", "tax_percent", "tax_rate", "vat"],
-        "moq": ["moq", "min_order_qty", "minimum_order_quantity", "pack_size"],
+        "moq": ["minimum_order_quantity", "minimum_order_qty", "moq", "min_order_qty", "pack_size"],
         "variant_code": ["variant_code", "variant_sku", "barcode", "upc", "ean", "item_sku"],
         "variant_name": ["variant_name", "variant", "option", "design", "style", "color_name"],
+        "variant_count": ["total_designs", "designs", "pieces", "pcs", "full_catalogue", "total_pieces"],
         "color": ["color", "colour", "shade"],
         "size": ["size", "dimensions", "length"],
         "stock_quantity": ["stock", "quantity", "inventory", "stock_quantity", "qty"],
@@ -110,8 +114,22 @@ class GenericTabularAdapter(BaseSupplierAdapter):
         k_desc, v_desc = self.find_field_value(first_record, self.ALIASES["description"])
         description = self.clean_str(v_desc)
 
+        # Pricing: Prioritize single_piece_price if explicitly provided by supplier, else supplier_price, else wholesale_price
+        k_single, v_single = self.find_field_value(first_record, self.ALIASES["single_piece_price"])
+        single_piece_price = self.clean_float(v_single)
+
         k_cost, v_cost = self.find_field_value(first_record, self.ALIASES["supplier_price"])
-        supplier_price = self.clean_float(v_cost)
+        clean_v_cost = self.clean_float(v_cost)
+
+        k_ws, v_ws = self.find_field_value(first_record, self.ALIASES["wholesale_price"])
+        wholesale_price = self.clean_float(v_ws)
+
+        if single_piece_price is not None:
+            supplier_price = single_piece_price
+        elif clean_v_cost is not None:
+            supplier_price = clean_v_cost
+        else:
+            supplier_price = wholesale_price
 
         k_gst, v_gst = self.find_field_value(first_record, self.ALIASES["gst_percent"])
         gst_percent = self.clean_float(v_gst)
@@ -136,10 +154,21 @@ class GenericTabularAdapter(BaseSupplierAdapter):
         else:
             self.record_provenance(prod_prov, "catalog_name", FieldSource.AUTO_FILLED, notes="Generated fallback")
 
+        if k_single and single_piece_price is not None:
+            self.record_provenance(prod_prov, "supplier_price", FieldSource.SOURCE, k_single, v_single, notes="Set from supplier single piece price")
+        elif k_cost and clean_v_cost is not None:
+            self.record_provenance(prod_prov, "supplier_price", FieldSource.SOURCE, k_cost, v_cost)
+        elif k_ws and wholesale_price is not None:
+            self.record_provenance(prod_prov, "supplier_price", FieldSource.SOURCE, k_ws, v_ws, notes="Set from supplier wholesale price")
+
         if k_prod:
             self.record_provenance(prod_prov, "product_name", FieldSource.SOURCE, k_prod, v_prod)
         else:
             self.record_provenance(prod_prov, "product_name", FieldSource.DERIVED, notes="Copied from catalog name")
+
+        # Preserve full_catalogue_price if present in source data
+        k_full_cat, v_full_cat = self.find_field_value(first_record, self.ALIASES["full_catalogue_price"])
+        full_catalogue_price = self.clean_float(v_full_cat)
 
         # Collect unmapped fields into raw_attributes
         mapped_keys = {
@@ -151,6 +180,15 @@ class GenericTabularAdapter(BaseSupplierAdapter):
         for orig_k, orig_v in first_record.data.items():
             if self.normalize_key(orig_k) not in mapped_keys and orig_v is not None:
                 raw_attributes[orig_k] = orig_v
+
+        if wholesale_price is not None:
+            raw_attributes["wholesale_price"] = wholesale_price
+
+        if single_piece_price is not None:
+            raw_attributes["single_piece_price"] = single_piece_price
+
+        if full_catalogue_price is not None:
+            raw_attributes["full_catalogue_price"] = full_catalogue_price
 
         product = Product(
             supplier_name=supplier_name,
@@ -168,7 +206,67 @@ class GenericTabularAdapter(BaseSupplierAdapter):
             source_metadata=prod_prov,
         )
 
+        # Populate extensible attributes from raw_attributes without data loss
+        for attr_k, attr_v in raw_attributes.items():
+            if attr_k not in ("raw_ocr_text",):
+                product.attributes[attr_k] = attr_v
+
+        k_size, v_size = self.find_field_value(first_record, self.ALIASES["size"])
+        clean_size = self.clean_str(v_size)
+        if clean_size:
+            product.attributes["size"] = clean_size
+
+        if wholesale_price is not None:
+            product.attributes["wholesale_price"] = wholesale_price
+
+        if single_piece_price is not None:
+            product.attributes["single_piece_price"] = single_piece_price
+
+        if full_catalogue_price is not None:
+            product.attributes["full_catalogue_price"] = full_catalogue_price
+
         # Build variants for this product
+        if len(records) == 1:
+            first_rec = records[0]
+            k_cnt, v_cnt, expected_count = self.find_variant_count(first_rec)
+            _, v_vcode = self.find_field_value(first_rec, self.ALIASES["variant_code"])
+            _, v_vname = self.find_field_value(first_rec, self.ALIASES["variant_name"])
+            k_sku, v_sku = self.find_field_value(first_rec, self.ALIASES["supplier_sku"])
+            clean_sku = self.clean_str(v_sku)
+
+            clean_vcode = self.clean_str(v_vcode)
+            clean_vname = self.clean_str(v_vname)
+
+            if expected_count and expected_count > 1 and not clean_vcode:
+                for idx in range(1, expected_count + 1):
+                    variant = self.build_derived_placeholder_variant(
+                        record=first_rec,
+                        parent=product,
+                        variant_idx=idx,
+                        total_expected=expected_count,
+                        source_field=k_cnt,
+                        source_raw_value=v_cnt,
+                        source_file=source_file,
+                        supplier_sku=clean_sku,
+                        unmapped_keys=mapped_keys,
+                    )
+                    product.add_variant(variant)
+                return product
+            elif expected_count == 1 and not clean_vcode and not clean_vname:
+                variant = self.build_derived_placeholder_variant(
+                    record=first_rec,
+                    parent=product,
+                    variant_idx=1,
+                    total_expected=1,
+                    source_field=k_cnt,
+                    source_raw_value=v_cnt,
+                    source_file=source_file,
+                    supplier_sku=clean_sku,
+                    unmapped_keys=mapped_keys,
+                )
+                product.add_variant(variant)
+                return product
+
         for idx, rec in enumerate(records, start=1):
             variant = self._build_variant(rec, product, idx, source_file)
             product.add_variant(variant)
@@ -189,11 +287,11 @@ class GenericTabularAdapter(BaseSupplierAdapter):
 
         # 1. Supplier SKU
         k_sku, v_sku = self.find_field_value(record, self.ALIASES["supplier_sku"])
-        supplier_sku = self.clean_str(v_sku) or f"SKU-{record.row_number}"
-        if k_sku:
+        supplier_sku = self.clean_str(v_sku)
+        if k_sku and supplier_sku:
             self.record_provenance(var_prov, "supplier_sku", FieldSource.SOURCE, k_sku, v_sku)
         else:
-            self.record_provenance(var_prov, "supplier_sku", FieldSource.AUTO_FILLED, notes="Fallback row SKU")
+            self.record_provenance(var_prov, "supplier_sku", FieldSource.MANUAL_REVIEW, notes="Supplier SKU absent in record")
 
         # 2. Variant Code (unique internal code)
         k_vcode, v_vcode = self.find_field_value(record, self.ALIASES["variant_code"])
@@ -203,13 +301,27 @@ class GenericTabularAdapter(BaseSupplierAdapter):
             self.record_provenance(var_prov, "variant_code", FieldSource.SOURCE, k_vcode, v_vcode)
         else:
             # Deterministically derived unique variant code
-            variant_code = f"{supplier_sku}-V{variant_idx:02d}"
-            self.record_provenance(
-                var_prov,
-                "variant_code",
-                FieldSource.DERIVED,
-                notes=f"Derived from supplier SKU + index {variant_idx}",
-            )
+            if supplier_sku:
+                variant_code = f"{supplier_sku}-V{variant_idx:02d}"
+                self.record_provenance(
+                    var_prov,
+                    "variant_code",
+                    FieldSource.DERIVED,
+                    notes=f"Derived from supplier SKU + index {variant_idx}",
+                )
+            else:
+                import re
+                raw_prefix = parent.product_group or parent.catalog_name
+                prefix = re.sub(r"[^\w\-]+", "-", str(raw_prefix).strip()).strip("-").upper()
+                if not prefix:
+                    prefix = f"SKU-{record.row_number}"
+                variant_code = f"{prefix}-V{variant_idx:02d}"
+                self.record_provenance(
+                    var_prov,
+                    "variant_code",
+                    FieldSource.DERIVED,
+                    notes=f"Derived from prefix '{prefix}' and index {variant_idx}",
+                )
 
         # 3. Variant Name
         k_vname, v_vname = self.find_field_value(record, self.ALIASES["variant_name"])

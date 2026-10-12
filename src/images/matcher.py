@@ -477,7 +477,7 @@ class DeterministicImageMatcher:
     def _clean_token(s: Optional[str]) -> str:
         if not s:
             return ""
-        cleaned = re.sub(r"[^\w]+", "-", s.strip().lower()).strip("-")
+        cleaned = re.sub(r"[\W_]+", "-", s.strip().lower()).strip("-")
         # Conservative spelling equivalence: amrah -> amra
         cleaned = re.sub(r"\bamrah\b", "amra", cleaned)
         return cleaned

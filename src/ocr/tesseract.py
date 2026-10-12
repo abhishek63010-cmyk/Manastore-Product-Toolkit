@@ -22,28 +22,60 @@ class TesseractOCRExtractor(BaseOCRExtractor):
 
     provider_name: str = "tesseract_ocr"
 
+    COMMON_TESSERACT_PATHS = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        r"/usr/bin/tesseract",
+        r"/usr/local/bin/tesseract",
+    ]
+
     def __init__(self, tesseract_cmd: Optional[str] = None):
         self.tesseract_cmd = tesseract_cmd
         self._checked_availability: Optional[bool] = None
+        self._resolved_cmd: Optional[str] = None
+
+    def _resolve_tesseract_cmd(self) -> Optional[str]:
+        """Resolve path to tesseract binary."""
+        if self._resolved_cmd:
+            return self._resolved_cmd
+
+        if self.tesseract_cmd:
+            if shutil.which(self.tesseract_cmd) or Path(self.tesseract_cmd).is_file():
+                self._resolved_cmd = self.tesseract_cmd
+                return self._resolved_cmd
+            return None
+
+        # Check system PATH
+        which_path = shutil.which("tesseract")
+        if which_path:
+            self._resolved_cmd = which_path
+            return self._resolved_cmd
+
+        # Check pytesseract default if installed
+        try:
+            import pytesseract
+            cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
+            if shutil.which(cmd) or Path(cmd).is_file():
+                self._resolved_cmd = cmd
+                return self._resolved_cmd
+        except ImportError:
+            pass
+
+        # Check common platform install paths
+        for cp in self.COMMON_TESSERACT_PATHS:
+            if Path(cp).is_file():
+                self._resolved_cmd = cp
+                return self._resolved_cmd
+
+        return None
 
     def is_available(self) -> bool:
-        """Check if pytesseract library and tesseract binary are available."""
+        """Check if tesseract binary is available on the system."""
         if self._checked_availability is not None:
             return self._checked_availability
 
-        try:
-            import pytesseract
-            from PIL import Image
-
-            # Check explicit command or system PATH
-            cmd = self.tesseract_cmd or getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
-            if shutil.which(cmd) or Path(cmd).is_file():
-                self._checked_availability = True
-            else:
-                self._checked_availability = False
-        except ImportError:
-            self._checked_availability = False
-
+        cmd = self._resolve_tesseract_cmd()
+        self._checked_availability = cmd is not None
         return self._checked_availability
 
     def extract_from_file(
@@ -79,9 +111,7 @@ class TesseractOCRExtractor(BaseOCRExtractor):
             )
 
         try:
-            from PIL import Image
-            with Image.open(path) as img:
-                return self._run_tesseract(img, str(path), filename, batch_id)
+            return self._run_tesseract_on_file(path, str(path), filename, batch_id)
         except Exception as e:
             return OCRResult(
                 status=OCRStatus.FAILED,
@@ -113,9 +143,15 @@ class TesseractOCRExtractor(BaseOCRExtractor):
             )
 
         try:
-            from PIL import Image
-            with Image.open(io.BytesIO(data)) as img:
-                return self._run_tesseract(img, filename, filename, batch_id)
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = Path(tmp.name)
+            try:
+                return self._run_tesseract_on_file(tmp_path, filename, filename, batch_id)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink()
         except Exception as e:
             return OCRResult(
                 status=OCRStatus.FAILED,
@@ -126,6 +162,125 @@ class TesseractOCRExtractor(BaseOCRExtractor):
                 error_message=f"Image decoding error: {type(e).__name__}",
             )
 
+    def _run_tesseract_on_file(
+        self,
+        file_path: Path,
+        source_identity: str,
+        filename: str,
+        batch_id: Optional[str],
+    ) -> OCRResult:
+        cmd = self._resolve_tesseract_cmd()
+        if not cmd:
+            return self._unavailable_result(source_identity, filename, batch_id)
+
+        # Check if pytesseract is available
+        has_pytesseract = False
+        try:
+            import pytesseract
+            from PIL import Image
+            has_pytesseract = True
+        except ImportError:
+            has_pytesseract = False
+
+        if has_pytesseract:
+            import pytesseract
+            from PIL import Image
+            if self.tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+
+            with Image.open(file_path) as img:
+                return self._run_tesseract(img, source_identity, filename, batch_id)
+
+        # Fallback to direct subprocess execution with the installed binary
+        import subprocess
+        import csv
+        import tempfile
+
+        try:
+            # 1. Plain text extraction via stdout
+            proc = subprocess.run(
+                [cmd, str(file_path), "stdout"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            cleaned_text = proc.stdout.strip()
+        except Exception as e:
+            return OCRResult(
+                status=OCRStatus.FAILED,
+                source_identity=source_identity,
+                source_filename=filename,
+                provider=self.provider_name,
+                batch_id=batch_id,
+                error_message=f"Tesseract execution error: {str(e)}",
+            )
+
+        if not cleaned_text:
+            return OCRResult(
+                status=OCRStatus.NO_TEXT_DETECTED,
+                source_identity=source_identity,
+                source_filename=filename,
+                provider=self.provider_name,
+                raw_text="",
+                confidence=1.0,
+                batch_id=batch_id,
+            )
+
+        # 2. Extract bounding boxes & confidence via TSV
+        bboxes: list[BoundingBox] = []
+        confidences: list[float] = []
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out_base = str(Path(td) / "ocr_out")
+                subprocess.run(
+                    [cmd, str(file_path), out_base, "tsv"],
+                    capture_output=True,
+                    check=True,
+                )
+                tsv_path = Path(out_base + ".tsv")
+                if tsv_path.exists():
+                    with open(tsv_path, "r", encoding="utf-8", errors="replace") as f:
+                        reader = csv.DictReader(f, delimiter="\t")
+                        for row in reader:
+                            box_text = (row.get("text") or "").strip()
+                            raw_conf = (row.get("conf") or "-1").strip()
+                            if box_text and raw_conf != "-1":
+                                try:
+                                    conf_val = float(raw_conf) / 100.0
+                                    confidences.append(conf_val)
+                                    bboxes.append(
+                                        BoundingBox(
+                                            x=float(row.get("left", 0)),
+                                            y=float(row.get("top", 0)),
+                                            width=float(row.get("width", 0)),
+                                            height=float(row.get("height", 0)),
+                                            confidence=conf_val,
+                                            text=box_text,
+                                        )
+                                    )
+                                except (ValueError, TypeError):
+                                    continue
+        except Exception:
+            pass
+
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.8
+        candidates = ConservativeCandidateParser.parse(cleaned_text)
+
+        return OCRResult(
+            status=OCRStatus.SUCCESS,
+            source_identity=source_identity,
+            source_filename=filename,
+            provider=self.provider_name,
+            raw_text=cleaned_text,
+            confidence=round(avg_conf, 2),
+            bounding_boxes=bboxes,
+            candidate_fields=candidates,
+            batch_id=batch_id,
+        )
+
     def _run_tesseract(
         self,
         img: Any,
@@ -135,8 +290,9 @@ class TesseractOCRExtractor(BaseOCRExtractor):
     ) -> OCRResult:
         import pytesseract
 
-        if self.tesseract_cmd:
-            pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+        cmd = self._resolve_tesseract_cmd()
+        if cmd:
+            pytesseract.pytesseract.tesseract_cmd = cmd
 
         # 1. Extract text
         raw_text = pytesseract.image_to_string(img)

@@ -106,6 +106,9 @@ class TabularExtractor:
                     keep_default_na=False,
                 )
 
+        if df.empty or len(df) == 0:
+            raise ValueError(f"Input source '{path.name}' contains no data rows (empty or header-only)")
+
         headers = [str(c).strip() for c in df.columns]
         records: list[RawRecord] = []
 

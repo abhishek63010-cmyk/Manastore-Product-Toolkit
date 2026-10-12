@@ -280,8 +280,8 @@ def test_benchmark_three_real_catalogues(tmp_path: Path):
     assert result.metrics.total_images_matched == 2
     assert result.metrics.total_images_ambiguous == 6
 
-    # Verify manifest artifact
-    manifest_file = out_dir / "image_approval_manifest.json"
+    # Verify manifest artifact in _internal/
+    manifest_file = out_dir / "_internal" / "image_approval_manifest.json"
     assert manifest_file.exists()
     manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
     assert len(manifest_data["entries"]) == 8

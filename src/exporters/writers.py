@@ -81,10 +81,52 @@ class OutputWriter:
         ordered_cols = existing_front + existing_images + remaining
         df = df[ordered_cols]
 
-        with pd.ExcelWriter(target, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Products", index=False)
+        cls._save_safe_xlsx(df, target, sheet_name="Products")
 
         return target.resolve()
+
+    @classmethod
+    def _save_safe_xlsx(cls, df: pd.DataFrame, target: Path, sheet_name: str = "Sheet1") -> Path:
+        """
+        Save dataframe to Excel workbook ensuring literal text beginning with '=', '+', '-', or '@'
+        is saved safely as text (data_type='s') to prevent accidental formula evaluation or #NAME? errors.
+        """
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+
+        cols = list(df.columns)
+        ws.append(cols)
+
+        formula_prefixes = ("=", "+", "-", "@")
+        for row_vals in df.itertuples(index=False):
+            ws.append(list(row_vals))
+            row_idx = ws.max_row
+            for col_idx, val in enumerate(row_vals, start=1):
+                if isinstance(val, str) and val.startswith(formula_prefixes):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.data_type = "s"
+
+        wb.save(target)
+        return target.resolve()
+
+    @classmethod
+    def write_amra_import_xlsx(
+        cls,
+        products: list[Product],
+        output_path: Union[str, Path],
+        images_path: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """
+        Export final Amra-format workbook conforming strictly to the 26-column schema
+        (matching Amra_data_with_updated_charm_prices.xlsx / Amra_data_with_all_blob_urls.xlsx).
+        """
+        from src.mappers.amra_transformer import AmraWorkbookTransformer
+        return AmraWorkbookTransformer.export_amra_workbook(
+            products=products,
+            output_path=output_path,
+            images_path=images_path,
+        )
 
     @classmethod
     def write_canonical_json(

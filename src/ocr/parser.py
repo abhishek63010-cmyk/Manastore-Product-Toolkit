@@ -35,10 +35,31 @@ class ConservativeCandidateParser:
         ),
     ]
 
-    # 3. Price / Wholesale Rate Patterns
+    # 3. Price Patterns (Distinguishing Wholesale vs Single Piece vs Generic)
+    WHOLESALE_PRICE_PATTERNS = [
+        (
+            r"(?i)\b(?:wholesale\s*(?:per\s*unit\s*)?(?:price|rate)|ws\s*price|w\.s\.?\s*price|wholesale)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
+            "REGEX_WHOLESALE_PRICE",
+        ),
+    ]
+
+    SINGLE_PIECE_PRICE_PATTERNS = [
+        (
+            r"(?i)\b(?:single\s*piece(?:\s*only)?|single\s*price|retail\s*price|single\s*rate|single)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
+            "REGEX_SINGLE_PIECE_PRICE",
+        ),
+    ]
+
+    FULL_CATALOGUE_PRICE_PATTERNS = [
+        (
+            r"(?i)\b(?:full\s*(?:catalogue|catalog)(?:\s*price)?|catalogue\s*price|catalog\s*price)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b|\(\d+\s*(?:pcs?|pieces?)\))?",
+            "REGEX_FULL_CATALOGUE_PRICE",
+        ),
+    ]
+
     PRICE_PATTERNS = [
         (
-            r"(?i)\b(?:wholesale\s*(?:price|rate)|ws\s*price|w\.s\.?\s*price|price|rate|mrp|cost)\s*[:=\-#]?\s*(?:₹|rs\.?|inr)?\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
+            r"(?i)\b(?:mrp|cost|price|rate)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
             "REGEX_PRICE_LABELED",
         ),
         (
@@ -50,8 +71,16 @@ class ConservativeCandidateParser:
     # 4. Catalogue / Collection Patterns
     CATALOG_PATTERNS = [
         (
-            r"(?i)\b(?:catalogue|catalog|collection|series)\s*(?:name)?\s*[:=\-#]?\s*([a-z0-9\s\-]+?)(?:\r?\n|$|(?=\b(?:price|rate|fabric|design|d\.no|gst)\b))",
+            r"(?i)\b(?:catalogue|catalog|collection|series)\s*(?:name)?\s*[:=\-#]?\s*([a-z0-9\s\-]+?)(?:\r?\n|$|(?=\b(?:price|rate|fabric|design|d\.no|gst|brand)\b))",
             "REGEX_CATALOG_NAME_LABELED",
+        ),
+    ]
+
+    # 4.1 Brand Patterns
+    BRAND_PATTERNS = [
+        (
+            r"(?i)\b(?:brand\s*(?:name)?)\s*[:=\-#]?\s*([a-z0-9\s\-]+?)(?:\r?\n|$|(?=\b(?:catalogue|catalog|price|rate|fabric|design|gst)\b))",
+            "REGEX_BRAND_NAME_LABELED",
         ),
     ]
 
@@ -138,7 +167,41 @@ class ConservativeCandidateParser:
                 if val and len(val) >= 2:
                     add_candidate("sku", val, match.group(0), 0.9, rule)
 
-        # 3. Price
+        # 3. Wholesale Price
+        for pattern, rule in cls.WHOLESALE_PRICE_PATTERNS:
+            for match in re.finditer(pattern, text):
+                raw_num = match.group(1).replace(",", "").strip()
+                try:
+                    num = float(raw_num)
+                    if num > 0:
+                        add_candidate("wholesale_price", num, match.group(0), 0.9, rule)
+                        add_candidate("price", num, match.group(0), 0.9, rule)
+                except ValueError:
+                    continue
+
+        # 3.1.1 Full Catalogue Price
+        for pattern, rule in cls.FULL_CATALOGUE_PRICE_PATTERNS:
+            for match in re.finditer(pattern, text):
+                raw_num = match.group(1).replace(",", "").strip()
+                try:
+                    num = float(raw_num)
+                    if num > 0:
+                        add_candidate("full_catalogue_price", num, match.group(0), 0.9, rule)
+                except ValueError:
+                    continue
+
+        # 3.2 Single Piece Price
+        for pattern, rule in cls.SINGLE_PIECE_PRICE_PATTERNS:
+            for match in re.finditer(pattern, text):
+                raw_num = match.group(1).replace(",", "").strip()
+                try:
+                    num = float(raw_num)
+                    if num > 0:
+                        add_candidate("single_piece_price", num, match.group(0), 0.9, rule)
+                except ValueError:
+                    continue
+
+        # 3.3 Generic Price
         for pattern, rule in cls.PRICE_PATTERNS:
             for match in re.finditer(pattern, text):
                 raw_num = match.group(1).replace(",", "").strip()
@@ -155,6 +218,13 @@ class ConservativeCandidateParser:
                 val = match.group(1).strip()
                 if val and len(val) >= 3:
                     add_candidate("catalog_name", val, match.group(0), 0.8, rule)
+
+        # 4.1 Brand name
+        for pattern, rule in cls.BRAND_PATTERNS:
+            for match in re.finditer(pattern, text):
+                val = match.group(1).strip()
+                if val and len(val) >= 2:
+                    add_candidate("brand_name", val, match.group(0), 0.85, rule)
 
         # 5. Fabric (labeled or unambiguous known fabric)
         fabric_found = False
@@ -195,5 +265,61 @@ class ConservativeCandidateParser:
                         add_candidate("total_designs", cnt, match.group(0), 0.9, rule)
                 except ValueError:
                     continue
+
+        # 8. Generic line-by-line label: value parsing with multiline continuation support
+        # Pre-group lines into labeled blocks allowing continuation lines
+        labeled_blocks: list[tuple[str, str, str]] = []
+        current_k: Optional[str] = None
+        current_v_parts: list[str] = []
+        current_raw_lines: list[str] = []
+
+        delimiter_regex = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9\s/_\.]{1,40}?)\s*[:=\-–—]\s*(.*)$")
+
+        for line in text.splitlines():
+            line_s = line.strip()
+            if not line_s:
+                # Blank line indicates paragraph / field boundary; close active field
+                if current_k and current_v_parts:
+                    val_str = " ".join(current_v_parts).strip()
+                    val_str = re.sub(r"\s+", " ", val_str)
+                    raw_str = "\n".join(current_raw_lines)
+                    labeled_blocks.append((current_k, val_str, raw_str))
+                current_k = None
+                current_v_parts = []
+                current_raw_lines = []
+                continue
+
+            match = delimiter_regex.match(line_s)
+            if match:
+                # Save previous block if exists
+                if current_k and current_v_parts:
+                    val_str = " ".join(current_v_parts).strip()
+                    val_str = re.sub(r"\s+", " ", val_str)
+                    raw_str = "\n".join(current_raw_lines)
+                    labeled_blocks.append((current_k, val_str, raw_str))
+
+                k_candidate = match.group(1).strip()
+                v_candidate = match.group(2).strip()
+                current_k = k_candidate
+                current_v_parts = [v_candidate] if v_candidate else []
+                current_raw_lines = [line_s]
+            else:
+                # If we have an active labeled field, this is a continuation line
+                if current_k is not None:
+                    current_v_parts.append(line_s)
+                    current_raw_lines.append(line_s)
+
+        if current_k and current_v_parts:
+            val_str = " ".join(current_v_parts).strip()
+            val_str = re.sub(r"\s+", " ", val_str)
+            raw_str = "\n".join(current_raw_lines)
+            labeled_blocks.append((current_k, val_str, raw_str))
+
+        for k_raw, v_raw, raw_block in labeled_blocks:
+            if k_raw and v_raw and len(k_raw) >= 2 and len(v_raw) >= 1:
+                norm_k = re.sub(r"[^\w]+", "_", k_raw.lower()).strip("_")
+                # Do not override core regex fields unless beneficial
+                if norm_k not in ("price", "rate", "gst", "total_designs", "design_no", "d_no", "full_catalogue_price"):
+                    add_candidate(norm_k, v_raw, raw_block, 0.85, "REGEX_KEY_VALUE_LINE")
 
         return candidates

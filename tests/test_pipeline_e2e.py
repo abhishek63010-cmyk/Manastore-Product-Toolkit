@@ -83,21 +83,30 @@ def test_pipeline_e2e_generic_kurti_fixture(tmp_path: Path, sample_generic_data)
     assert result.metrics.total_images_matched == 4
     assert result.metrics.is_valid is True
 
-    # Check generated files
-    assert (out_dir / "canonical_products.xlsx").exists()
-    assert (out_dir / "canonical_products.json").exists()
-    assert (out_dir / "canonical_products.csv").exists()
-    assert (out_dir / "validation_report.xlsx").exists()
-    assert (out_dir / "validation_report.json").exists()
+    # Check generated files in simplified folder structure
+    # 1. Final workbook and summary at root
+    assert (out_dir / "amra_data_ready.xlsx").exists()
+    assert (out_dir / "RUN_SUMMARY.txt").exists()
+    summary_text = (out_dir / "RUN_SUMMARY.txt").read_text(encoding="utf-8")
+    assert "FINAL ADMIN IMPORT FILE: amra_data_ready.xlsx" in summary_text
+
+    # 2. Canonical and supporting files in _internal/
+    assert (out_dir / "_internal" / "canonical_products.xlsx").exists()
+    assert (out_dir / "_internal" / "canonical_products.json").exists()
+    assert (out_dir / "_internal" / "canonical_products.csv").exists()
+
+    # 3. Reports in _reports/
+    assert (out_dir / "_reports" / "validation_report.xlsx").exists()
+    assert (out_dir / "_reports" / "validation_report.json").exists()
 
     # Verify JSON content
-    json_data = json.loads((out_dir / "canonical_products.json").read_text(encoding="utf-8"))
+    json_data = json.loads((out_dir / "_internal" / "canonical_products.json").read_text(encoding="utf-8"))
     assert json_data["total_products"] == 2
     assert json_data["total_variants"] == 4
     assert "export_version" in json_data
 
     # Verify Excel content has expected sheets
-    excel_sheets = pd.ExcelFile(out_dir / "canonical_products.xlsx").sheet_names
+    excel_sheets = pd.ExcelFile(out_dir / "_internal" / "canonical_products.xlsx").sheet_names
     assert "Products" in excel_sheets
 
 
@@ -125,8 +134,8 @@ def test_pipeline_e2e_amra_zip_fixture(tmp_path: Path, sample_amra_zip_data):
     assert result.metrics.total_images_matched == 4
     assert result.metrics.is_valid is True
 
-    # Verify validation report Excel sheets
-    val_excel = pd.ExcelFile(out_dir / "validation_report.xlsx")
+    # Verify validation report Excel sheets in _reports/
+    val_excel = pd.ExcelFile(out_dir / "_reports" / "validation_report.xlsx")
     assert "Summary" in val_excel.sheet_names
     assert "Validation_Issues" in val_excel.sheet_names
     assert "Image_Matching" in val_excel.sheet_names
@@ -230,8 +239,8 @@ def test_pipeline_e2e_deterministic_repeated_execution(tmp_path: Path, sample_ge
     assert res1.success and res2.success
     assert res1.metrics == res2.metrics
 
-    json1 = json.loads((out_dir1 / "canonical_products.json").read_text(encoding="utf-8"))
-    json2 = json.loads((out_dir2 / "canonical_products.json").read_text(encoding="utf-8"))
+    json1 = json.loads((out_dir1 / "_internal" / "canonical_products.json").read_text(encoding="utf-8"))
+    json2 = json.loads((out_dir2 / "_internal" / "canonical_products.json").read_text(encoding="utf-8"))
 
     assert json1["total_products"] == json2["total_products"]
     assert json1["total_variants"] == json2["total_variants"]
@@ -273,4 +282,8 @@ def test_pipeline_e2e_cli_subprocess(tmp_path: Path, sample_generic_data):
     assert stdout_json["success"] is True
     assert stdout_json["metrics"]["total_products"] == 2
     assert stdout_json["metrics"]["total_variants"] == 4
-    assert (out_dir / "canonical_products.json").exists()
+    # Final import workbook at root
+    assert (out_dir / "amra_data_ready.xlsx").exists()
+    assert (out_dir / "RUN_SUMMARY.txt").exists()
+    # Internal artifacts in _internal/
+    assert (out_dir / "_internal" / "canonical_products.json").exists()

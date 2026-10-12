@@ -1,0 +1,12 @@
+{
+  "batchName": "October_Saree_Batch",
+  "catalogues": [
+    {
+      "name": "Rajtex_Vol58",
+      "supplierFolder": "Amra_wholesale",
+      "supplierAdapter": "generic",
+      "source": "input/Amra_wholesale/Rajtex Ajrak Vol 58/rajtex ajrakh vol-58.jpeg",
+      "images": "input/Amra_wholesale/Rajtex Ajrak Vol 58/product-images"
+    }
+  ]
+}

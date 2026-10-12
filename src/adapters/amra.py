@@ -164,18 +164,26 @@ class AmraAdapter(BaseSupplierAdapter):
 
         k_name, v_name = self.find_field_value(first_record, self.PRODUCT_ALIASES["product_name"])
         clean_pname = self.clean_str(v_name)
-        if clean_pname:
+        if clean_pname and clean_pname != catalog_name:
             product_name = clean_pname
             self.record_provenance(prod_prov, "product_name", FieldSource.SOURCE, k_name, v_name)
         else:
-            # Derive customer-friendly product title from brand + catalog
-            parts = [p for p in (brand_name, catalog_name, product_type) if p]
-            product_name = " ".join(parts)
+            # Derive customer-friendly product title from brand, catalog, fabric, work, and type
+            from src.mappers.amra_transformer import AmraWorkbookTransformer
+            fab = self.clean_str(self.find_field_value(first_record, self.CATEGORY_ATTRIBUTES["fabric"])[1])
+            wrk = self.clean_str(self.find_field_value(first_record, self.CATEGORY_ATTRIBUTES["work"])[1])
+            product_name = AmraWorkbookTransformer.generate_customer_product_name(
+                catalog_name=catalog_name,
+                brand_name=brand_name,
+                fabric=fab,
+                work=wrk,
+                product_type=product_type,
+            )
             self.record_provenance(
                 prod_prov,
                 "product_name",
                 FieldSource.DERIVED,
-                notes="Synthesized from Brand + Catalog + Type",
+                notes="Synthesized from Brand + Work + Fabric + Type",
             )
 
         k_desc, v_desc = self.find_field_value(first_record, self.PRODUCT_ALIASES["description"])
@@ -245,10 +253,22 @@ class AmraAdapter(BaseSupplierAdapter):
             source_metadata=prod_prov,
         )
 
+        # Populate extensible attributes from raw_attributes without data loss
+        for attr_k, attr_v in raw_attributes.items():
+            if attr_k not in ("raw_ocr_text",):
+                product.attributes.setdefault(attr_k, attr_v)
+
+        from src.mappers.amra_transformer import AmraWorkbookTransformer
+        if not product.product_group:
+            product.product_group = AmraWorkbookTransformer.generate_product_group(product.catalog_name)
+
+        if not product.description:
+            product.description = AmraWorkbookTransformer.generate_description(product, {})
+
         # Check if single catalog record defines an expected variant count (e.g. Total Designs: 6 Pcs)
         if len(records) == 1:
             first_rec = records[0]
-            expected_count = self.find_variant_count(first_rec)
+            k_cnt, v_cnt, expected_count = self.find_variant_count(first_rec)
             k_vname, v_vname = self.find_field_value(first_rec, self.VARIANT_ALIASES["variant_name"])
             k_sku, v_sku = self.find_field_value(first_rec, self.PRODUCT_ALIASES["supplier_sku"])
             if (expected_count and expected_count > 1) or (not v_vname and not v_sku):

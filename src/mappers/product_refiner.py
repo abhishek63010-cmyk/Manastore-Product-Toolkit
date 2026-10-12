@@ -53,7 +53,7 @@ def refine_product(row):
         "product_name": product_name,
         "varient_name": "",
         "description": description,
-        "selling_proce": 899,
+        "selling_price": 899,
         "image-sku": "",
         "image_url": "",
         "publish": False,

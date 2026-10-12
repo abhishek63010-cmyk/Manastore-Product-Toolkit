@@ -67,7 +67,10 @@ class PipelineResult(BaseModel):
     def format_summary_text(self) -> str:
         """Render a readable summary table for terminal logging."""
         status_str = "SUCCESS" if self.success else "FAILED"
-        val_status = "PASSED" if self.metrics.is_valid else "FAILED"
+        if not self.success or self.metrics.total_validation_errors > 0 or not self.metrics.is_valid:
+            val_status = "FAILED"
+        else:
+            val_status = "PASSED"
 
         lines = [
             "==================================================",

@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-i", "--input",
         dest="input_path",
         type=str,
-        help="Path to supplier input tabular file (CSV, TSV, or XLSX)",
+        help="Path to supplier input file (CSV, TSV, XLSX, JPG, JPEG, PNG, WEBP, or PDF)",
     )
     parser.add_argument(
         "-s", "--supplier",
