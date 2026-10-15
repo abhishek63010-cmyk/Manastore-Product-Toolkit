@@ -42,7 +42,12 @@ class OutputManager:
 
     @property
     def final_amra_workbook_path(self) -> Path:
-        """The single final admin-import workbook path at root."""
+        """Path for the 26-column Amra import workbook."""
+        return self.root_dir / self.FINAL_WORKBOOK_NAME
+
+    @property
+    def final_workbook_path(self) -> Path:
+        """Alias for the pipeline's Amra import workbook path."""
         return self.root_dir / self.FINAL_WORKBOOK_NAME
 
     @property

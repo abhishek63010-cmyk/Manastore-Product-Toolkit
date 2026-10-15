@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -53,13 +54,29 @@ def test_batch_runner_validate_only_mode(tmp_path: Path):
 
 
 def test_batch_runner_rejects_empty_manifest(tmp_path: Path):
-    """Verify empty catalogue list is rejected."""
+    """Verify empty catalogue list is rejected when no supplier roots are discoverable."""
     manifest_file = tmp_path / "empty_manifest.json"
     manifest_file.write_text(json.dumps({"batchName": "Empty", "catalogues": []}), encoding="utf-8")
 
-    proc = run_batch_powershell(manifest_file, validate_only=True)
-    assert proc.returncode != 0
-    assert "at least one catalogue entry" in proc.stdout or "VALIDATION FAILED" in proc.stdout
+    input_root = PROJECT_ROOT / "input"
+    amra_root = input_root / "Amra_wholesale"
+    mudhra_root = input_root / "Mudhra_Ethnic"
+    renamed_roots = []
+
+    for candidate in (amra_root, mudhra_root):
+        if candidate.exists():
+            backup = candidate.with_name(candidate.name + "_hidden_for_empty_manifest_test")
+            shutil.move(str(candidate), str(backup))
+            renamed_roots.append((candidate, backup))
+
+    try:
+        proc = run_batch_powershell(manifest_file, validate_only=True)
+        assert proc.returncode != 0
+        assert "at least one catalogue entry" in proc.stdout or "VALIDATION FAILED" in proc.stdout
+    finally:
+        for original, backup in renamed_roots:
+            if backup.exists():
+                shutil.move(str(backup), str(original))
 
 
 def test_batch_runner_rejects_duplicate_catalogue_names(tmp_path: Path):
@@ -162,7 +179,7 @@ def test_batch_runner_execution_multiple_catalogues(tmp_path: Path):
     Verify:
     1. Output directory is uniquely named by batchName.
     2. Subfolders for each catalogue created.
-    3. Final workbook is named manastore_pre_ready.xlsx.
+    3. Final workbook uses the catalogue output-folder name.
     4. batch_summary.csv is produced.
     """
     # Catalogue 1: generic apparel CSV
@@ -228,16 +245,52 @@ def test_batch_runner_execution_multiple_catalogues(tmp_path: Path):
 
     # Check catalogue 1 subfolder
     cat1_dir = latest_batch_dir / "01_Aura_Collection"
-    assert (cat1_dir / "manastore_pre_ready.xlsx").exists()
+    cat1_workbook = cat1_dir / "01_Aura_Collection.xlsx"
+    assert cat1_workbook.exists()
     assert (cat1_dir / "RUN_SUMMARY.txt").exists()
     assert (cat1_dir / "_internal").exists()
     assert (cat1_dir / "_reports").exists()
     # Ensure amra_data_ready.xlsx was renamed
     assert not (cat1_dir / "amra_data_ready.xlsx").exists()
+    summary_text = (cat1_dir / "RUN_SUMMARY.txt").read_text(encoding="utf-8")
+    assert "01_Aura_Collection.xlsx" in summary_text
+    assert "manastore_pre_ready.xlsx" not in summary_text
+    assert rows[1][9].endswith("01_Aura_Collection.xlsx")
+    final_wb = openpyxl.load_workbook(cat1_workbook, read_only=True)
+    assert final_wb.sheetnames == ["Amra_Data"]
+    assert [cell.value for cell in next(final_wb.active.iter_rows(min_row=1, max_row=1))] == [
+        "No",
+        "supplier_name",
+        "catalog_name",
+        "product_group",
+        "product_name",
+        "varient_name",
+        "supplier_sku",
+        "product_type",
+        "category_slug",
+        "brand_name",
+        "fabric",
+        "blouse_fabric",
+        "work",
+        "occasion",
+        "size",
+        "description",
+        "supplier_price",
+        "gst_percent",
+        "selling_price",
+        "image-sku",
+        "image_url",
+        "publish",
+        "image1_url",
+        "image2_url",
+        "image3_url",
+        "image4_url",
+    ]
+    final_wb.close()
 
     # Check catalogue 2 subfolder
     cat2_dir = latest_batch_dir / "02_Raas_Collection"
-    assert (cat2_dir / "manastore_pre_ready.xlsx").exists()
+    assert (cat2_dir / "02_Raas_Collection.xlsx").exists()
     assert (cat2_dir / "RUN_SUMMARY.txt").exists()
     assert (cat2_dir / "_internal").exists()
     assert (cat2_dir / "_reports").exists()
@@ -302,5 +355,5 @@ def test_batch_runner_failed_catalogue_followed_by_success(tmp_path: Path):
     assert rows[2][1] == "Good_Catalogue"
     assert rows[2][2] == "SUCCESS"
 
-    # Good catalogue produced manastore_pre_ready.xlsx
-    assert (latest_batch_dir / "02_Good_Catalogue" / "manastore_pre_ready.xlsx").exists()
+    # Good catalogue produced a folder-named workbook.
+    assert (latest_batch_dir / "02_Good_Catalogue" / "02_Good_Catalogue.xlsx").exists()

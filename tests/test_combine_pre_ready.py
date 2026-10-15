@@ -92,7 +92,7 @@ def test_combine_single_workbook(tmp_path):
         [1, "SupplierA", "CatA", "GroupA", "Product 1", "Red", "SKU1", "Saree", "saree", "BrandA", "Silk", None, "Zari", "Party", "Free", "Desc 1", 500, 5, 750, "IMG-01", "http://img1.jpg", "yes", None, None, None, None],
         [2, "SupplierA", "CatA", "GroupA", "Product 1", "Blue", "SKU2", "Saree", "saree", "BrandA", "Silk", None, "Zari", "Party", "Free", "Desc 2", 500, 5, 750, "IMG-02", "http://img2.jpg", "yes", None, None, None, None],
     ]
-    create_sample_workbook(cat1_dir / "manastore_pre_ready.xlsx", rows1)
+    create_sample_workbook(cat1_dir / "01_CatalogueA.xlsx", rows1)
 
     result = run_script([str(batch_dir)])
     assert result.returncode == 0

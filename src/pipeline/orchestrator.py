@@ -77,6 +77,7 @@ class PipelineOrchestrator:
             adapter = AdapterRegistry.get_adapter(
                 supplier_name=config.supplier,
                 raw_data=raw_data,
+                source_path=config.input_path,
             )
             if config.verbose:
                 print(f"[Pipeline] Using adapter: '{adapter.adapter_name}'")

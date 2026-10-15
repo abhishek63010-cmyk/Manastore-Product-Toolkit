@@ -5,7 +5,7 @@
 .DESCRIPTION
     Processes one or more product catalogues configured in a JSON manifest.
     Validates configuration, runs the pipeline sequentially for each entry,
-    renames the final admin workbook to manastore_pre_ready.xlsx, preserves
+    renames the final admin workbook to a catalogue-specific filename, preserves
     detailed logs and internal/diagnostic artifacts, and outputs a batch_summary.csv.
 
 .PARAMETER ManifestPath
@@ -75,6 +75,172 @@ try {
     exit 1
 }
 
+function Get-PrimaryDiscoverySource {
+    param(
+        [Parameter(Mandatory = $true)] [string]$CatalogueDir,
+        [Parameter(Mandatory = $true)] [string[]]$SupportedExtensions
+    )
+
+    $skipNames = @("_internal", "_reports", "images", "product-images", "product_images", "__pycache__")
+    $files = Get-ChildItem -Path $CatalogueDir -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            $ext = $_.Extension.ToLower()
+            $SupportedExtensions -contains $ext -and
+            -not ($skipNames -contains $_.Directory.Name) -and
+            -not (($_.FullName -split '[\\/]') | Where-Object { $skipNames -contains $_ })
+        }
+
+    if (-not $files -or $files.Count -eq 0) {
+        return $null
+    }
+
+    $ranked = foreach ($file in $files) {
+        $relativePath = ((Resolve-Path -Path $file.FullName -Relative) -replace '[\\/]', '/').TrimStart('./')
+        $depth = ($relativePath.Split('/').Count) - 1
+        $extRank = 99
+        switch ($file.Extension.ToLower()) {
+            ".xlsx" { $extRank = 0 }
+            ".xls" { $extRank = 1 }
+            ".csv" { $extRank = 2 }
+            ".tsv" { $extRank = 3 }
+            ".png" { $extRank = 4 }
+            ".jpg" { $extRank = 5 }
+            ".jpeg" { $extRank = 6 }
+            ".webp" { $extRank = 7 }
+            ".pdf" { $extRank = 8 }
+            ".bmp" { $extRank = 9 }
+            ".tiff" { $extRank = 10 }
+            default { $extRank = 99 }
+        }
+
+        [PSCustomObject]@{
+            File = $file
+            RelativePath = $relativePath
+            Depth = [int]$depth
+            ExtRank = [int]$extRank
+        }
+    }
+
+    $best = $ranked | Sort-Object Depth, ExtRank, RelativePath | Select-Object -First 1
+    $sameTier = $ranked | Where-Object { $_.Depth -eq $best.Depth -and $_.ExtRank -eq $best.ExtRank }
+    if ($sameTier.Count -gt 1) {
+        $paths = ($sameTier | ForEach-Object { $_.File.FullName }) -join '; '
+        throw "Ambiguous primary source file in '$CatalogueDir': $paths"
+    }
+
+    return $best.File.FullName
+}
+
+function Get-AutoDiscoveredCatalogueEntries {
+    param(
+        [Parameter(Mandatory = $true)] [string]$ProjectRoot,
+        [Parameter(Mandatory = $true)] [string[]]$SupportedExtensions
+    )
+
+    $knownRoots = @(
+        @{ Name = "Amra_wholesale"; Adapter = "amra"; Root = (Join-Path $ProjectRoot "input\Amra_wholesale") },
+        @{ Name = "Mudhra_Ethnic"; Adapter = "mudhra_ethnic"; Root = (Join-Path $ProjectRoot "input\Mudhra_Ethnic") }
+    )
+
+    $catalogues = @()
+    $knownInputRoot = Join-Path $ProjectRoot "input"
+    $unsupported = @()
+    $baseNameCounts = @{}
+
+    if (Test-Path $knownInputRoot) {
+        $rootDirs = Get-ChildItem -Path $knownInputRoot -Directory -ErrorAction SilentlyContinue
+        foreach ($dir in $rootDirs) {
+            $matched = $knownRoots | Where-Object { $_.Name -eq $dir.Name }
+            if (-not $matched) {
+                $candidate = Get-ChildItem -Path $dir.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { $SupportedExtensions -contains $_.Extension.ToLower() }
+                if ($candidate -and $candidate.Count -gt 0) {
+                    $unsupported += $dir.Name
+                }
+            }
+        }
+    }
+
+    foreach ($root in $knownRoots) {
+        if (-not (Test-Path $root.Root)) { continue }
+
+        $candidateDirs = Get-ChildItem -Path $root.Root -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.FullName -notmatch '[/\\](_internal|_reports|images|product-images|product_images)[/\\]' -and
+                $_.Name -notin @('_internal', '_reports', 'images', 'product-images', 'product_images')
+            }
+
+        foreach ($catDir in $candidateDirs) {
+            $baseKey = $catDir.Name.ToLower()
+            if (-not $baseNameCounts.ContainsKey($baseKey)) { $baseNameCounts[$baseKey] = 0 }
+            $baseNameCounts[$baseKey]++
+        }
+    }
+
+    foreach ($root in $knownRoots) {
+        if (-not (Test-Path $root.Root)) { continue }
+
+        $candidateDirs = Get-ChildItem -Path $root.Root -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.FullName -notmatch '[/\\](_internal|_reports|images|product-images|product_images)[/\\]' -and
+                $_.Name -notin @('_internal', '_reports', 'images', 'product-images', 'product_images')
+            }
+
+        foreach ($catDir in $candidateDirs) {
+            try {
+                $sourcePath = Get-PrimaryDiscoverySource -CatalogueDir $catDir.FullName -SupportedExtensions $SupportedExtensions
+            } catch {
+                throw "Auto-discovery validation error for '$($catDir.FullName)': $_"
+            }
+
+            if (-not $sourcePath) { continue }
+
+            $relativeSource = ((Resolve-Path -Path $sourcePath -Relative) -replace '[\\/]', '/').TrimStart('./')
+            if ($relativeSource.StartsWith("input/")) {
+                $candidateName = $catDir.Name
+                if ($baseNameCounts[$catDir.Name.ToLower()] -gt 1) {
+                    $candidateName = "$($root.Name)_$candidateName"
+                }
+
+                $catalogues += [PSCustomObject]@{
+                    name = $candidateName
+                    supplierFolder = $root.Name
+                    supplierAdapter = $root.Adapter
+                    source = $relativeSource
+                    images = $null
+                }
+            }
+        }
+    }
+
+    $nameCounts = @{}
+    foreach ($entry in $catalogues) {
+        $key = $entry.name.ToLower()
+        if (-not $nameCounts.ContainsKey($key)) { $nameCounts[$key] = 0 }
+        $nameCounts[$key]++
+    }
+
+    $normalizedCatalogues = @()
+    foreach ($entry in $catalogues) {
+        $name = $entry.name
+        if ($nameCounts[$name.ToLower()] -gt 1) {
+            $name = "$($entry.supplierFolder)_$name"
+        }
+        $normalizedCatalogues += [PSCustomObject]@{
+            name = $name
+            supplierFolder = $entry.supplierFolder
+            supplierAdapter = $entry.supplierAdapter
+            source = $entry.source
+            images = $entry.images
+        }
+    }
+
+    return [PSCustomObject]@{
+        Catalogues = $normalizedCatalogues
+        UnsupportedRoots = $unsupported
+    }
+}
+
 # --- 3. Dynamic Adapter Validation List ---
 # Known valid adapters and aliases supported by AdapterRegistry
 $KnownAdapters = @(
@@ -83,6 +249,9 @@ $KnownAdapters = @(
     "amra",
     "amra_adapter",
     "amra_wholesale",
+    "mudhra",
+    "mudhra_ethnic",
+    "mudhra_ethnic_adapter",
     "tabular",
     "default"
 )
@@ -117,16 +286,31 @@ if ([string]::IsNullOrWhiteSpace($BatchName) -or $hasInvalid) {
     $ValidationErrors += "Manifest 'batchName' is invalid or contains prohibited filesystem characters: '$BatchName'"
 }
 
-if (-not $Manifest.catalogues -or $Manifest.catalogues.Count -eq 0) {
-    $ValidationErrors += "Manifest must contain a non-empty 'catalogues' array with at least one catalogue entry."
+$AutoDiscover = Get-AutoDiscoveredCatalogueEntries -ProjectRoot $ProjectRoot -SupportedExtensions $SupportedExtensions
+if ($AutoDiscover.UnsupportedRoots.Count -gt 0) {
+    foreach ($root in $AutoDiscover.UnsupportedRoots | Sort-Object -Unique) {
+        $ValidationErrors += "Unsupported supplier root detected under 'input/': '$root'. Supported supplier roots: Amra_wholesale, Mudhra_Ethnic."
+    }
+}
+
+$ManifestCatalogues = @()
+if ($Manifest.catalogues) {
+    $ManifestCatalogues = @($Manifest.catalogues)
+}
+
+$DiscoveredCatalogues = @($AutoDiscover.Catalogues)
+$CombinedCatalogues = @($ManifestCatalogues + $DiscoveredCatalogues)
+
+if ($CombinedCatalogues.Count -eq 0) {
+    $ValidationErrors += "Manifest must contain a non-empty 'catalogues' array with at least one catalogue entry, or there must be at least one discoverable supplier root under 'input/'."
 }
 
 $SeenNames = @{}
 $CatalogueList = @()
 
-if ($Manifest.catalogues) {
+if ($CombinedCatalogues.Count -gt 0) {
     $idx = 0
-    foreach ($cat in $Manifest.catalogues) {
+    foreach ($cat in $CombinedCatalogues) {
         $idx++
         $catName = if ($cat.name) { [string]$cat.name.Trim() } else { "" }
         $entryLabel = "Catalogue #" + $idx + " (" + $catName + ")"
@@ -137,7 +321,6 @@ if ($Manifest.catalogues) {
             continue
         }
 
-        # Check placeholder tokens
         if ($catName.StartsWith("<") -or $catName.StartsWith("[") -or $catName.EndsWith(">") -or $catName.EndsWith("]")) {
             $ValidationErrors += ($entryLabel + ": 'name' appears to be an unresolved placeholder: '" + $catName + "'")
         }
@@ -180,6 +363,28 @@ if ($Manifest.catalogues) {
             }
         }
 
+        # Supplier-root validation for discovered catalogues and explicit config conflicts
+        $supplierFolder = if ($cat.supplierFolder) { [string]$cat.supplierFolder.Trim() } else { "" }
+        if ($rawSource) {
+            $resolvedPath = if ([System.IO.Path]::IsPathRooted($rawSource)) { $rawSource } else { Join-Path $ProjectRoot $rawSource }
+            $resolvedPathNorm = [System.IO.Path]::GetFullPath($resolvedPath)
+            $pathParts = $resolvedPathNorm.Split([System.IO.Path]::DirectorySeparatorChar, [System.StringSplitOptions]::RemoveEmptyEntries)
+            $rootMatch = $null
+            foreach ($part in $pathParts) {
+                if ($part -eq "Amra_wholesale" -or $part -eq "Mudhra_Ethnic") {
+                    $rootMatch = $part
+                    break
+                }
+            }
+            if ($rootMatch) {
+                $expectedAdapter = if ($rootMatch -eq "Amra_wholesale") { "amra" } else { "mudhra_ethnic" }
+                $adapterNorm = $adapter.ToLower().Replace("-", "_")
+                if ($adapterNorm -ne $expectedAdapter -and $adapterNorm -ne $expectedAdapter + "_adapter" -and $adapterNorm -ne $expectedAdapter + "_wholesale") {
+                    $ValidationErrors += ($entryLabel + ": Explicit supplierAdapter '" + $adapter + "' conflicts with supplier root '" + $rootMatch + "'. Expected adapter: '" + $expectedAdapter + "'.")
+                }
+            }
+        }
+
         # Images path validation (optional)
         $rawImages = if ($cat.images) { [string]$cat.images.Trim() } else { "" }
         $resolvedImages = $null
@@ -198,7 +403,7 @@ if ($Manifest.catalogues) {
         $CatalogueList += [PSCustomObject]@{
             Index = $idx
             Name = $catName
-            SupplierFolder = if ($cat.supplierFolder) { [string]$cat.supplierFolder.Trim() } else { "" }
+            SupplierFolder = $supplierFolder
             SupplierAdapter = $adapter
             SourceRaw = $rawSource
             SourceResolved = $resolvedSource
@@ -217,6 +422,9 @@ Write-Host " Project Root:  $ProjectRoot"
 Write-Host " Manifest File: $ManifestFullPath"
 Write-Host " Batch Name:    $BatchName"
 Write-Host " Catalogues:    $($CatalogueList.Count) configured"
+if ($AutoDiscover.Catalogues.Count -gt 0) {
+    Write-Host " Auto-Discovered Input Catalogues: $($AutoDiscover.Catalogues.Count)"
+}
 Write-Host "--------------------------------------------------------------------------------"
 
 foreach ($c in $CatalogueList) {
@@ -329,21 +537,22 @@ foreach ($c in $CatalogueList) {
 
     # Inspect produced workbooks
     $rawAmraPath = Join-Path $catOutputDir "amra_data_ready.xlsx"
-    $targetFinalPath = Join-Path $catOutputDir "manastore_pre_ready.xlsx"
+    $targetWorkbookName = "${catFolderName}.xlsx"
+    $targetFinalPath = Join-Path $catOutputDir $targetWorkbookName
     $catSuccess = $false
     $errorSummary = ""
 
     if ($exitCode -eq 0) {
-        # Check if amra_data_ready.xlsx was generated and rename it safely
+        # The internal canonical workbook has a different schema and is never the import file.
         if (Test-Path $rawAmraPath) {
             try {
                 if (Test-Path $targetFinalPath) {
                     Remove-Item -Path $targetFinalPath -Force
                 }
-                Rename-Item -Path $rawAmraPath -NewName "manastore_pre_ready.xlsx"
+                Rename-Item -Path $rawAmraPath -NewName $targetWorkbookName
                 $catSuccess = $true
             } catch {
-                $errorSummary = "Failed to rename amra_data_ready.xlsx to manastore_pre_ready.xlsx: $_"
+                $errorSummary = "Failed to rename amra_data_ready.xlsx to $targetWorkbookName`: $_"
                 $catSuccess = $false
             }
         } elseif (Test-Path $targetFinalPath) {
@@ -357,12 +566,12 @@ foreach ($c in $CatalogueList) {
         $catSuccess = $false
     }
 
-    # Update RUN_SUMMARY.txt to reference manastore_pre_ready.xlsx
+    # Update RUN_SUMMARY.txt to reference the catalogue-specific workbook.
     $runSummaryFile = Join-Path $catOutputDir "RUN_SUMMARY.txt"
     if (Test-Path $runSummaryFile) {
         try {
             $content = Get-Content -Path $runSummaryFile -Raw -Encoding UTF8
-            $updated = $content.Replace("amra_data_ready.xlsx", "manastore_pre_ready.xlsx")
+            $updated = $content.Replace("amra_data_ready.xlsx", $targetWorkbookName)
             Set-Content -Path $runSummaryFile -Value $updated -Encoding UTF8
         } catch {
             # Non-fatal if summary file text replacement fails

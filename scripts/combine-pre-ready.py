@@ -3,7 +3,8 @@
 scripts/combine-pre-ready.py
 
 Standalone consolidation script for MANA Store Product Toolkit.
-Discovers individual 'manastore_pre_ready.xlsx' files in immediate catalogue subfolders
+Discovers catalogue-folder-named workbooks (or legacy 'manastore_pre_ready.xlsx' files)
+in immediate catalogue subfolders
 of a batch run directory, validates their schemas, and consolidates all product rows
 into a single root-level '<BATCH_DIRECTORY>/manastore_pre_ready.xlsx'.
 
@@ -58,6 +59,7 @@ except Exception:
     ]
 
 FILENAME_TARGET = "manastore_pre_ready.xlsx"
+LEGACY_FILENAME = FILENAME_TARGET
 EXCLUDED_DIR_NAMES = {"_internal", "_reports"}
 
 
@@ -78,8 +80,8 @@ def is_row_empty(row_values: Tuple[Any, ...]) -> bool:
 
 def discover_source_workbooks(batch_dir: Path) -> List[Path]:
     """
-    Discover only 'manastore_pre_ready.xlsx' directly inside immediate
-    catalogue subfolders of the batch directory.
+    Discover folder-named workbooks or legacy 'manastore_pre_ready.xlsx' files
+    directly inside immediate catalogue subfolders of the batch directory.
     Excludes _internal, _reports, dot/underscore folders, and the batch root itself.
     """
     if not batch_dir.exists() or not batch_dir.is_dir():
@@ -95,8 +97,12 @@ def discover_source_workbooks(batch_dir: Path) -> List[Path]:
         if subdir.name in EXCLUDED_DIR_NAMES or subdir.name.startswith((".", "_")):
             continue
             
-        candidate_file = subdir / FILENAME_TARGET
-        if candidate_file.exists() and candidate_file.is_file():
+        candidate_names = (f"{subdir.name}.xlsx", LEGACY_FILENAME)
+        candidate_file = next(
+            (subdir / name for name in candidate_names if (subdir / name).is_file()),
+            None,
+        )
+        if candidate_file is not None:
             source_workbooks.append(candidate_file)
 
     return source_workbooks
@@ -309,7 +315,7 @@ def consolidate_workbooks(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Consolidate multiple catalogue manastore_pre_ready.xlsx workbooks into one root workbook."
+        description="Consolidate catalogue-folder-named or legacy pre-ready workbooks into one root workbook."
     )
     parser.add_argument(
         "batch_dir",
@@ -352,7 +358,7 @@ def main():
         source_files = discover_source_workbooks(batch_dir)
         if not source_files:
             raise ConsolidationError(
-                f"No catalogue workbooks named '{FILENAME_TARGET}' found in immediate subfolders of '{batch_dir}'. "
+                f"No folder-named or legacy '{LEGACY_FILENAME}' catalogue workbooks found in immediate subfolders of '{batch_dir}'. "
                 f"(Subfolders checked must be direct subdirectories and not '_internal' or '_reports')"
             )
 
