@@ -35,38 +35,16 @@ class ConservativeCandidateParser:
         ),
     ]
 
-    # 3. Price Patterns (Distinguishing Wholesale vs Single Piece vs Generic)
-    WHOLESALE_PRICE_PATTERNS = [
+    # 2.5 Explicit Color / Shade Patterns
+    COLOR_PATTERNS = [
         (
-            r"(?i)\b(?:wholesale\s*(?:per\s*unit\s*)?(?:price|rate)|ws\s*price|w\.s\.?\s*price|wholesale)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
-            "REGEX_WHOLESALE_PRICE",
+            r"(?i)\b(?:color|colour|shade|colorway)\s*[:=\-#]?\s*([a-z0-9\s\-_/]+?)(?:\r?\n|$|(?=\b(?:fabric|work|size|price|rate|gst|design)\b))",
+            "REGEX_COLOR_LABELED",
         ),
     ]
 
-    SINGLE_PIECE_PRICE_PATTERNS = [
-        (
-            r"(?i)\b(?:single\s*piece(?:\s*only)?|single\s*price|retail\s*price|single\s*rate|single)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
-            "REGEX_SINGLE_PIECE_PRICE",
-        ),
-    ]
+    # 3. Price Patterns (delegated to EvidenceBasedPriceNormalizer)
 
-    FULL_CATALOGUE_PRICE_PATTERNS = [
-        (
-            r"(?i)\b(?:full\s*(?:catalogue|catalog)(?:\s*price)?|catalogue\s*price|catalog\s*price)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b|\(\d+\s*(?:pcs?|pieces?)\))?",
-            "REGEX_FULL_CATALOGUE_PRICE",
-        ),
-    ]
-
-    PRICE_PATTERNS = [
-        (
-            r"(?i)\b(?:mrp|cost|price|rate)\s*[:=\-#—–]?\s*(?:[₹%¥$=:\-\s]|rs\.?|inr)*\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?",
-            "REGEX_PRICE_LABELED",
-        ),
-        (
-            r"(?:₹\s*|rs\.\s*)(\d+(?:,\d{3})*(?:\.\d{1,2})?)\b(?!\s*%)",
-            "REGEX_CURRENCY_SYMBOL",
-        ),
-    ]
 
     # 4. Catalogue / Collection Patterns
     CATALOG_PATTERNS = [
@@ -167,50 +145,20 @@ class ConservativeCandidateParser:
                 if val and len(val) >= 2:
                     add_candidate("sku", val, match.group(0), 0.9, rule)
 
-        # 3. Wholesale Price
-        for pattern, rule in cls.WHOLESALE_PRICE_PATTERNS:
+        # 2.5 Explicit Colors
+        for pattern, rule in cls.COLOR_PATTERNS:
             for match in re.finditer(pattern, text):
-                raw_num = match.group(1).replace(",", "").strip()
-                try:
-                    num = float(raw_num)
-                    if num > 0:
-                        add_candidate("wholesale_price", num, match.group(0), 0.9, rule)
-                        add_candidate("price", num, match.group(0), 0.9, rule)
-                except ValueError:
-                    continue
+                val = match.group(1).strip()
+                if val and len(val) >= 2:
+                    add_candidate("color", val, match.group(0), 0.85, rule)
 
-        # 3.1.1 Full Catalogue Price
-        for pattern, rule in cls.FULL_CATALOGUE_PRICE_PATTERNS:
-            for match in re.finditer(pattern, text):
-                raw_num = match.group(1).replace(",", "").strip()
-                try:
-                    num = float(raw_num)
-                    if num > 0:
-                        add_candidate("full_catalogue_price", num, match.group(0), 0.9, rule)
-                except ValueError:
-                    continue
-
-        # 3.2 Single Piece Price
-        for pattern, rule in cls.SINGLE_PIECE_PRICE_PATTERNS:
-            for match in re.finditer(pattern, text):
-                raw_num = match.group(1).replace(",", "").strip()
-                try:
-                    num = float(raw_num)
-                    if num > 0:
-                        add_candidate("single_piece_price", num, match.group(0), 0.9, rule)
-                except ValueError:
-                    continue
-
-        # 3.3 Generic Price
-        for pattern, rule in cls.PRICE_PATTERNS:
-            for match in re.finditer(pattern, text):
-                raw_num = match.group(1).replace(",", "").strip()
-                try:
-                    num = float(raw_num)
-                    if num > 0:
-                        add_candidate("price", num, match.group(0), 0.85, rule)
-                except ValueError:
-                    continue
+        # 3. Evidence-Based Prices
+        from src.ocr.pricing import EvidenceBasedPriceNormalizer
+        price_cands = EvidenceBasedPriceNormalizer.extract_price_candidates(text)
+        for pc in price_cands:
+            add_candidate(pc.field_name, pc.candidate_value, pc.raw_text, pc.confidence, pc.extraction_rule)
+            if pc.field_name in ("wholesale_price", "single_piece_price"):
+                add_candidate("price", pc.candidate_value, pc.raw_text, pc.confidence, pc.extraction_rule)
 
         # 4. Catalog name
         for pattern, rule in cls.CATALOG_PATTERNS:

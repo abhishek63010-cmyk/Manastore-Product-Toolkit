@@ -37,9 +37,9 @@ class AmraAdapter(BaseSupplierAdapter):
         "category_slug": ["category_slug", "category"],
         "description": ["description", "product_description", "details"],
         "supplier_sku": ["supplier_sku", "sku", "item_code", "product_sku"],
-        "supplier_price": ["supplier_price", "per_unit_price", "wholesale_per_unit_price", "wholesale_price", "single_piece", "cost", "catalogue_price_per_piece"],
+        "supplier_price": ["single_piece_price", "single_piece", "supplier_price", "per_unit_price", "wholesale_per_unit_price", "wholesale_price", "cost", "catalogue_price_per_piece"],
         "gst_percent": ["gst_percent", "gst", "tax_percent"],
-        "moq": ["moq", "single_piece", "minimum_order_qty"],
+        "moq": ["moq", "minimum_order_qty"],
         "dispatch_location": ["dispatch_location", "dispatch_from", "location"],
     }
 
@@ -263,7 +263,7 @@ class AmraAdapter(BaseSupplierAdapter):
             product.product_group = AmraWorkbookTransformer.generate_product_group(product.catalog_name)
 
         if not product.description:
-            product.description = AmraWorkbookTransformer.generate_description(product, {})
+            product.description = AmraWorkbookTransformer.generate_factual_description(product, {})
 
         # Check if single catalog record defines an expected variant count (e.g. Total Designs: 6 Pcs)
         if len(records) == 1:

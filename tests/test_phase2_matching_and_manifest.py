@@ -245,6 +245,10 @@ def test_strict_upload_gate_blocks_pending_and_ambiguous(tmp_path: Path):
     assert v1.primary_image_url.startswith("https://blob.manastore.internal")
 
 
+@pytest.mark.skipif(
+    not Path("input/raw-catalog-001/MANA_Raw_Supplier_Data.xlsx").exists(),
+    reason="Optional local benchmark data not present in worktree",
+)
 def test_benchmark_three_real_catalogues(tmp_path: Path):
     """
     Run full benchmark pipeline on real supplier data:

@@ -1,12 +1,35 @@
 {
-  "batchName": "October_Saree_Batch",
+  "batchName": "Amra_batch_single_piece_1",
   "catalogues": [
+    
     {
-      "name": "Rajtex_Vol58",
+      "name": "Rajtex Noorani",
       "supplierFolder": "Amra_wholesale",
-      "supplierAdapter": "generic",
-      "source": "input/Amra_wholesale/Rajtex Ajrak Vol 58/rajtex ajrakh vol-58.jpeg",
-      "images": "input/Amra_wholesale/Rajtex Ajrak Vol 58/product-images"
+      "supplierAdapter": "amra",
+      "source": "input/Amra_wholesale/Rajtex Noorani/Rajtex Noorani.png",
+      "images": "input/Amra_wholesale/Rajtex Noorani/product-images"
+    },
+    {
+      "name": "Aab Ladali",
+      "supplierFolder": "Amra_wholesale",
+      "supplierAdapter": "amra",
+      "source": "input/Amra_wholesale/Aab Ladali/Aab Ladali.png",
+      "images": "input/Amra_wholesale/Aab Ladali/product-images"
+    },
+    {
+      "name": "soft silk 5019",
+      "supplierFolder": "Amra_wholesale",
+      "supplierAdapter": "amra",
+      "source": "input/Amra_wholesale/soft silk 5019/soft silk 5019.png",
+      "images": "input/Amra_wholesale/soft silk 5019/product-images"
+    },
+    {
+      "name": "Thrirath Yamuna",
+      "supplierFolder": "Amra_wholesale",
+      "supplierAdapter": "amra",
+      "source": "input/Amra_wholesale/Thrirath Yamuna/Thrirath Yamuna.png",
+      "images": "input/Amra_wholesale/Thrirath Yamuna/product-images"
     }
+    
   ]
 }
