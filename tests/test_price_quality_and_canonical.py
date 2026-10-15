@@ -70,6 +70,25 @@ def test_price_normalizer_preserves_legitimate_prices_starting_with_two():
     assert norm["supplier_price"] == 2500.0
 
 
+def test_price_normalizer_preserves_2500_with_valid_catalogue_arithmetic():
+    ocr_text = (
+        "Wholesale Per Unit Price - 2000\n"
+        "Full Catalogue - 12000 (6 Pcs)\n"
+        "Single Piece - ₹2500 (Single Piece Only)"
+    )
+    candidates = EvidenceBasedPriceNormalizer.extract_price_candidates(ocr_text)
+    norm = EvidenceBasedPriceNormalizer.reconcile_and_normalize_prices(
+        candidates=candidates,
+        total_designs=6,
+        raw_text=ocr_text,
+    )
+
+    assert norm["wholesale_price"] == 2000.0
+    assert norm["full_catalogue_price"] == 12000.0
+    assert norm["single_piece_price"] == 2500.0
+    assert norm["supplier_price"] == 2500.0
+
+
 def test_price_normalizer_handles_indian_currency_symbols():
     """Test extracting prices prefixed by ₹, INR, Rs., #, and @."""
     text = "Rate: ₹1,299 | Single: Rs. 1450.00 | Full: #7,794 (6 Pcs)"

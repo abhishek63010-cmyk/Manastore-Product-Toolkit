@@ -1,11 +1,16 @@
 import csv
 import json
 from pathlib import Path
+import openpyxl
 import pytest
 
+from src.adapters.amra import AmraAdapter
+from src.exporters.canonical import CanonicalExport
+from src.exporters.writers import OutputWriter
 from src.extractors.image import ImageCatalogueExtractor
 from src.extractors.tabular import TabularExtractor
 from src.images.manifest import ApprovalStatus
+from src.mappers.amra_transformer import AmraWorkbookTransformer
 from src.models.enums import ReviewStatus, ValidationSeverity
 from src.ocr.fake import FakeOCRExtractor
 from src.ocr.models import OCRResult
@@ -69,6 +74,132 @@ def test_labeled_catalogue_image_to_structured_products(tmp_path: Path, register
     assert record_data["fabric"] == "Pure Dola Silk"
     assert record_data["work"] == "Zari Weaving"
     assert record_data["gst_percent"] == 5.0
+
+
+@pytest.mark.parametrize(
+    ("ocr_text", "expected_count"),
+    [
+        ("Work ajrakh PrintedTotel Designs\n6 Pes", 6),
+        ("Totsl Designs - 6 Pes", 6),
+        ("Totsl Designs -5 Pes", 5),
+    ],
+)
+def test_misspelled_ocr_design_count_reaches_amra_workbook_rows(
+    tmp_path: Path,
+    register_mock_ocr,
+    ocr_text: str,
+    expected_count: int,
+):
+    catalogue_img = tmp_path / "ocr_count_catalogue.png"
+    catalogue_img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    register_mock_ocr("test_count_ocr", ocr_text)
+
+    raw_data = ImageCatalogueExtractor.extract(catalogue_img, ocr_provider="test_count_ocr")
+    products = AmraAdapter().transform(raw_data)
+    rows = AmraWorkbookTransformer.transform_to_amra_records(products)
+
+    assert raw_data.records[0].data["total_designs"] == expected_count
+    assert len(products) == 1
+    assert len(products[0].variants) == expected_count
+    assert len(rows) == expected_count
+    assert all(variant.color is None and variant.publish is False for variant in products[0].variants)
+    assert all(not row["image_url"] and row["publish"] is False for row in rows)
+
+
+@pytest.mark.parametrize(
+    ("ocr_text", "expected_count", "expected_wholesale", "expected_full", "expected_single"),
+    [
+        (
+            "Total Designs - 6 Pcs\n"
+            "PeWholessle Per Unit Price - 2580 (Per Piece Wholesale)\n"
+            "Full Catalogue - 23480 (6 Pcs)\n"
+            "Single Piece - Available et 2680/- (Single Piece Only)\n"
+            "GST - 5% Extra",
+            6,
+            580.0,
+            3480.0,
+            680.0,
+        ),
+        (
+            "Totsl Designs - 5 Pes\n"
+            "Wholesale Per Unit Price - 81145 (Per Piece Wholesale)\n"
+            "Full Catalogue - 25725 (5 Pes)\n"
+            "Single Piece - Available at 21245/- (Single Piece Only)\n"
+            "GST - 5% Extra",
+            5,
+            1145.0,
+            5725.0,
+            1245.0,
+        ),
+        (
+            "Total Designs - 4\n"
+            "Wholesale Per Unit Price - 1395 (Per Piece Wholesale)\n"
+            "Full Catalogue - 5580 (4 Pcs)\n"
+            "Single Piece - 71495 (Single Piece Only)\n"
+            "SINGLE PIECE AVAILABLE - 21495 (1 Pc)\n"
+            "GST - 5% Extra",
+            4,
+            1395.0,
+            5580.0,
+            1495.0,
+        ),
+    ],
+)
+def test_evidence_corrected_prices_reach_canonical_and_amra_exports(
+    tmp_path: Path,
+    register_mock_ocr,
+    ocr_text: str,
+    expected_count: int,
+    expected_wholesale: float,
+    expected_full: float,
+    expected_single: float,
+):
+    catalogue_img = tmp_path / "price_catalogue.png"
+    catalogue_img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    register_mock_ocr("test_price_evidence_ocr", ocr_text)
+
+    raw_data = ImageCatalogueExtractor.extract(catalogue_img, ocr_provider="test_price_evidence_ocr")
+    record_data = raw_data.records[0].data
+    products = AmraAdapter().transform(raw_data)
+    product = products[0]
+
+    assert record_data["wholesale_price"] == expected_wholesale
+    assert record_data["full_catalogue_price"] == expected_full
+    assert record_data["single_piece_price"] == expected_single
+    assert record_data["supplier_price"] == expected_single
+    assert len(product.variants) == expected_count
+    assert product.supplier_price == expected_single
+
+    canonical_path = OutputWriter.write_canonical_json(
+        CanonicalExport.from_products(products=products),
+        tmp_path / "_internal" / "canonical_products.json",
+    )
+    workbook_path = OutputWriter.write_amra_import_xlsx(
+        products=products,
+        output_path=tmp_path / "manastore_pre_ready.xlsx",
+    )
+    canonical_data = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical_product = canonical_data["products"][0]
+    assert canonical_product["supplier_price"] == expected_single
+    assert len(canonical_product["variants"]) == expected_count
+
+    workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
+    worksheet = workbook["Amra_Data"]
+    headers = [cell.value for cell in next(worksheet.iter_rows(min_row=1, max_row=1))]
+    assert headers == AmraWorkbookTransformer.EXACT_COLUMNS
+    rows = list(worksheet.iter_rows(min_row=2, values_only=True))
+    assert len(rows) == expected_count
+    price_col = headers.index("supplier_price")
+    gst_col = headers.index("gst_percent")
+    selling_price_col = headers.index("selling_price")
+    publish_col = headers.index("publish")
+    image_url_cols = [headers.index(name) for name in ("image_url", "image1_url", "image2_url", "image3_url", "image4_url")]
+    assert all(float(row[price_col]) == expected_single for row in rows)
+    assert all(row[gst_col] == "5% Extra" for row in rows)
+    assert all(row[selling_price_col] in (None, "") for row in rows)
+    assert all(row[publish_col] is False for row in rows)
+    assert all(not row[column] for row in rows for column in image_url_cols)
+    workbook.close()
 
 
 def test_single_product_declaring_variant_count_generates_all_variants(tmp_path: Path, register_mock_ocr):

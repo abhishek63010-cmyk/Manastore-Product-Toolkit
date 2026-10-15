@@ -100,7 +100,7 @@ class ConservativeCandidateParser:
     # 7. Total Designs / Pieces Patterns
     COUNT_PATTERNS = [
         (
-            r"(?i)\b(?:total\s*(?:designs?|pieces?|pcs?)|pack\s*of|set\s*of)\s*[:=\-#]?\s*(\d+)\s*(?:pcs?|pieces?|designs?)?",
+            r"(?i)(?:t(?:o|0)t(?:a|e|s)l\s*(?:designs?|pieces?|pcs?)|pack\s*of|set\s*of)\s*[:=\-#]?\s*(\d+)\s*(?:pcs?|pieces?|designs?)?",
             "REGEX_TOTAL_DESIGNS",
         ),
     ]

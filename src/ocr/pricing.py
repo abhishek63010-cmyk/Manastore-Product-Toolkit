@@ -7,7 +7,7 @@ Principles:
 - Supports Indian Rupee symbols (₹, Rs, Rs., INR), thousands separators, and decimal amounts.
 - Distinguishes single-piece price, wholesale-per-piece price, full-catalogue price, and generic price.
 - Preserves raw OCR text, candidate values, source references, and extraction evidence.
-- Detects Tesseract OCR misclassification of Rupee symbol '₹' as the digit '2' using multi-evidence verification.
+- Detects observed OCR substitutions of Rupee symbols as leading digits only with multi-field evidence.
 - NEVER globally strips leading '2' (preserves valid prices like 250, 2500, 299).
 - Uses arithmetic consistency and textual calculations as consistency checks, not standalone proof.
 - Keeps ambiguous or unconfirmed prices flagged for human review (ReviewStatus.PENDING).
@@ -42,6 +42,7 @@ class EvidenceBasedPriceNormalizer:
     CURRENCY_PREFIX = r"(?:[₹%¥$=:\-\s#@|/—–]|rs\.?|inr)*"
     NUMBER_PATTERN = r"(\d+(?:,\d{3})*(?:\.\d{1,2})?)"
     UNIT_SUFFIX = r"(?:\/-|\/pc|\bper\s*(?:pc|piece)\b)?"
+    OCR_RUPEE_PREFIX_DIGITS = frozenset({"2", "7", "8"})
 
     # Pattern for explicit arithmetic breakdown in catalogue text (e.g. '6 Pcs x 21415 = #8490')
     BREAKDOWN_PATTERN = re.compile(
@@ -59,6 +60,20 @@ class EvidenceBasedPriceNormalizer:
             return val if val > 0 else None
         except ValueError:
             return None
+
+    @classmethod
+    def _ocr_price_forms(cls, value: float) -> list[tuple[float, Optional[str]]]:
+        """Return raw prices and candidates for observed Rupee-glyph OCR substitutions."""
+        forms = [(value, None)]
+        if not value.is_integer():
+            return forms
+
+        digits = str(int(value))
+        if len(digits) >= 4 and digits[0] in cls.OCR_RUPEE_PREFIX_DIGITS:
+            corrected = cls.clean_numeric_string(digits[1:])
+            if corrected is not None and corrected >= 100:
+                forms.append((corrected, digits[0]))
+        return forms
 
     @classmethod
     def extract_price_candidates(cls, text: str) -> list[PriceCandidate]:
@@ -97,6 +112,7 @@ class EvidenceBasedPriceNormalizer:
         # Matches 'Single Piece - #1515', 'Single Piece - ₹1515', 'SINGLE PIECE AVAILABLE — @1515(1Pe)'
         single_piece_regex = re.compile(
             r"(?i)\b(?:single\s*piece(?:\s*(?:available|only))?|single\s*price|retail\s*price|single\s*rate|single)\s*[:=\-#—–]?\s*"
+            r"(?:available\s+(?:at|et)\s*)?"
             + cls.CURRENCY_PREFIX
             + cls.NUMBER_PATTERN
             + r"\s*(?:\/-|\/pc|\bper\s*(?:pc|piece)\b|\(\d+\s*(?:pcs?|pieces?|pe)\))?",
@@ -118,7 +134,7 @@ class EvidenceBasedPriceNormalizer:
         # 3. Wholesale Per Unit Price
         # Matches 'Wholesale Per Unit Price - 21415 (Per Piece Wholesale)', 'Wholesale - ₹1415'
         wholesale_regex = re.compile(
-            r"(?i)\b(?:wholesale\s*(?:per\s*unit\s*)?(?:price|rate)|ws\s*price|w\.s\.?\s*price|wholesale)\s*[:=\-#—–]?\s*"
+            r"(?i)\b(?:pe)?(?:wholes(?:a|s)le\s*(?:per\s*unit\s*)?(?:price|rate)|ws\s*price|w\.s\.?\s*price|wholes(?:a|s)le)\s*[:=\-#—–]?\s*"
             + cls.CURRENCY_PREFIX
             + cls.NUMBER_PATTERN
             + r"\s*" + cls.UNIT_SUFFIX,
@@ -229,7 +245,7 @@ class EvidenceBasedPriceNormalizer:
         effective_count = total_designs or breakdown_count
 
         # -------------------------------------------------------------
-        # Rupee Symbol '₹' vs Leading '2' Evidence Verification
+        # Rupee symbol OCR substitution verification
         # -------------------------------------------------------------
         # Condition 1: Full catalogue price starts with '2' (e.g. 28490) while alternative
         # mention has '#8490' or '8490' without '2'.
@@ -271,6 +287,36 @@ class EvidenceBasedPriceNormalizer:
                         f"Wholesale price corrected from {raw_ws} to {trimmed_ws} via breakdown arithmetic"
                     )
 
+        # Use a unique declared-count arithmetic match to corroborate OCR-glyph prefixes.
+        arithmetic_corrected_prefixes: set[str] = set()
+        if effective_count and effective_count > 1 and ws_candidates and fc_candidates:
+            matching_pairs: dict[tuple[float, float], set[tuple[Optional[str], Optional[str]]]] = {}
+            for ws_candidate in ws_candidates:
+                for ws_value, ws_prefix in cls._ocr_price_forms(ws_candidate.candidate_value):
+                    for fc_candidate in fc_candidates:
+                        for fc_value, fc_prefix in cls._ocr_price_forms(fc_candidate.candidate_value):
+                            if abs(effective_count * ws_value - fc_value) < 1.0:
+                                matching_pairs.setdefault((ws_value, fc_value), set()).add((ws_prefix, fc_prefix))
+
+            has_raw_arithmetic_pair = any(
+                (None, None) in prefix_pairs for prefix_pairs in matching_pairs.values()
+            )
+            if not has_raw_arithmetic_pair and len(matching_pairs) == 1:
+                (verified_ws, verified_fc), prefix_pairs = next(iter(matching_pairs.items()))
+                arithmetic_corrected_prefixes = {
+                    prefix
+                    for pair in prefix_pairs
+                    for prefix in pair
+                    if prefix is not None
+                }
+                if arithmetic_corrected_prefixes:
+                    corrected_ws = verified_ws
+                    corrected_fc = verified_fc
+                    provenance_notes.append(
+                        f"Wholesale/full-catalogue prices corrected to {verified_ws}/{verified_fc}: "
+                        f"unique {effective_count}-design arithmetic match"
+                    )
+
         # Condition 3: Single piece price verification
         corrected_sp = raw_sp
         if raw_sp and str(int(raw_sp)).startswith("2") and len(str(int(raw_sp))) >= 4:
@@ -286,6 +332,46 @@ class EvidenceBasedPriceNormalizer:
                     provenance_notes.append(
                         f"Single piece price corrected from {raw_sp} to {trimmed_sp} via alternative mention"
                     )
+
+        # Correct a single-piece glyph only when arithmetic confirms the same OCR substitution,
+        # or multiple independent single-piece mentions agree and fit the verified price range.
+        if corrected_ws and corrected_fc and effective_count and effective_count > 1 and sp_candidates:
+            if arithmetic_corrected_prefixes:
+                corrected_single_values = {
+                    value
+                    for candidate in sp_candidates
+                    for value, prefix in cls._ocr_price_forms(candidate.candidate_value)
+                    if prefix in arithmetic_corrected_prefixes and corrected_ws <= value < corrected_fc
+                }
+                if len(corrected_single_values) == 1:
+                    corrected_sp = next(iter(corrected_single_values))
+                    if corrected_sp != raw_sp:
+                        provenance_notes.append(
+                            f"Single piece price corrected from {raw_sp} to {corrected_sp}: "
+                            "leading glyph matches the arithmetic-confirmed currency substitution"
+                        )
+            else:
+                repeated_corrected_values: dict[float, set[float]] = {}
+                for candidate in sp_candidates:
+                    for value, prefix in cls._ocr_price_forms(candidate.candidate_value):
+                        if (
+                            prefix is not None
+                            and candidate.candidate_value >= corrected_fc
+                            and corrected_ws <= value < corrected_fc
+                        ):
+                            repeated_corrected_values.setdefault(value, set()).add(candidate.candidate_value)
+
+                corroborated = [
+                    value for value, raw_values in repeated_corrected_values.items()
+                    if len(raw_values) >= 2
+                ]
+                if len(corroborated) == 1:
+                    corrected_sp = corroborated[0]
+                    if corrected_sp != raw_sp:
+                        provenance_notes.append(
+                            f"Single piece price corrected to {corrected_sp}: "
+                            "independent OCR mentions agree after currency-glyph normalization"
+                        )
 
         # Store results
         if corrected_sp is not None:

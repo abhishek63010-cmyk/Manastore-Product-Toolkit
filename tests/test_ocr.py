@@ -158,6 +158,20 @@ def test_parser_extracts_all_patterns():
         assert c.confidence > 0.0
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected_count"),
+    [
+        ("Work ajrakh PrintedTotel Designs\n6 Pes", 6),
+        ("Totsl Designs - 6 Pes", 6),
+        ("Totsl Designs -5 Pes", 5),
+    ],
+)
+def test_parser_extracts_design_counts_with_ocr_misspellings(raw, expected_count):
+    candidates = ConservativeCandidateParser.parse(raw)
+
+    assert next(c.candidate_value for c in candidates if c.field_name == "total_designs") == expected_count
+
+
 def test_parser_empty_and_no_pattern_text():
     """Verify parser returns empty candidates when no patterns are detected."""
     assert ConservativeCandidateParser.parse("") == []
