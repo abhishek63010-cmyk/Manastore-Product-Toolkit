@@ -88,12 +88,33 @@ class ImageCatalogueExtractor:
         if "product_name" in row_data and "catalog_name" not in row_data:
             row_data["catalog_name"] = row_data["product_name"]
 
-        # If single_piece_price is present, set supplier_price to single piece price
+        # Reconcile and normalize prices using multi-evidence verification
+        from src.ocr.pricing import EvidenceBasedPriceNormalizer
+        price_cands = [
+            EvidenceBasedPriceNormalizer.extract_price_candidates(extracted_text)
+        ]
+        flattened_price_cands = [item for sublist in price_cands for item in sublist]
+        tot_cnt = row_data.get("total_designs")
+        try:
+            tot_cnt_int = int(tot_cnt) if tot_cnt is not None else None
+        except (ValueError, TypeError):
+            tot_cnt_int = None
+
+        norm_prices = EvidenceBasedPriceNormalizer.reconcile_and_normalize_prices(
+            candidates=flattened_price_cands,
+            total_designs=tot_cnt_int,
+            raw_text=extracted_text,
+        )
+        for k, v in norm_prices.items():
+            if v is not None:
+                row_data[k] = v
+
+        # Ensure supplier_price reflects dropshipping single-piece price if present, else wholesale
         if "single_piece_price" in row_data and row_data["single_piece_price"] is not None:
             row_data["supplier_price"] = row_data["single_piece_price"]
-        elif "wholesale_price" in row_data and "supplier_price" not in row_data:
+        elif "wholesale_price" in row_data and row_data["wholesale_price"] is not None:
             row_data["supplier_price"] = row_data["wholesale_price"]
-        elif "price" in row_data and "supplier_price" not in row_data:
+        elif "price" in row_data and row_data["price"] is not None:
             row_data["supplier_price"] = row_data["price"]
 
         headers = list(row_data.keys())

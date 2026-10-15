@@ -141,6 +141,7 @@ class AmraWorkbookTransformer:
         """
         Synthesize customer-facing product title from brand, collection, fabric, work, and type.
         Example: 'Rajtex Ajrak Vol-58' -> 'Rajtex Ajrakh Printed Modal Satin Saree'
+        Example: 'RAJTEX NOORANI' -> 'Rajtex Noorani Pashmina Silk Saree'
         """
         clean_cat = str(catalog_name or "").strip()
         brand = str(brand_name or "").strip()
@@ -163,16 +164,22 @@ class AmraWorkbookTransformer:
                 work_adj = work_str[:-6].strip() + " Printed"
             elif work_str.lower().endswith(" printed") or work_str.lower().endswith(" work"):
                 work_adj = work_str
-            else:
+            elif len(work_str.split()) <= 2:
                 work_adj = f"{work_str} Work"
 
         tokens = []
         if brand:
             tokens.append(brand)
-        if work_adj:
+
+        if work_adj and clean_cat and (clean_cat.lower() in work_adj.lower() or work_adj.lower().startswith(clean_cat.lower()[:4])):
             tokens.append(work_adj)
-        elif clean_cat:
-            tokens.append(clean_cat)
+        else:
+            if clean_cat:
+                cat_token = clean_cat.title() if (brand and not brand.isupper() and clean_cat.isupper()) else clean_cat
+                tokens.append(cat_token)
+            if work_adj and len(work_adj.split()) <= 2:
+                tokens.append(work_adj)
+
         if fab:
             tokens.append(fab)
         if p_type:
@@ -181,33 +188,48 @@ class AmraWorkbookTransformer:
         return " ".join(tokens) if tokens else (catalog_name or "Product")
 
     @classmethod
-    def generate_description(
+    def generate_factual_description(
         cls,
         product: Product,
-        row_dict: dict[str, Any],
+        row_dict: Optional[dict[str, Any]] = None,
     ) -> str:
         """
-        Generate rich customer-facing product description preserving supplier facts.
-        Reuses existing description if already populated and informative.
+        Generate rich customer-facing factual description containing brand, catalogue,
+        saree fabric, blouse fabric, work, occasion, and single-piece price.
         """
-        if product.description and str(product.description).strip() and len(str(product.description).strip()) > 15:
+        if product.description and str(product.description).strip() and len(str(product.description).strip()) > 20:
             return str(product.description).strip()
 
-        brand = str(row_dict.get("brand_name") or product.brand_name or "").strip()
-        fabric = str(row_dict.get("fabric") or product.get_attribute("fabric") or "").strip()
-        work = str(row_dict.get("work") or product.get_attribute("work") or "").strip()
-        blouse_fabric = str(row_dict.get("blouse_fabric") or product.get_attribute("blouse_fabric") or "").strip()
-        occasion = str(row_dict.get("occasion") or product.get_attribute("occasion") or "").strip()
-        product_type = str(row_dict.get("product_type") or product.product_type or "Saree").strip().lower()
+        row = row_dict or {}
+        brand = str(row.get("brand_name") or product.brand_name or "").strip()
+        catalog = str(row.get("catalog_name") or product.catalog_name or "").strip()
+        fabric = str(row.get("fabric") or product.get_attribute("fabric") or product.get_attribute("saree_fabric") or "").strip()
+        blouse_fabric = str(row.get("blouse_fabric") or product.get_attribute("blouse_fabric") or "").strip()
+        work = str(row.get("work") or product.get_attribute("work") or "").strip()
+        occasion = str(row.get("occasion") or product.get_attribute("occasion") or "").strip()
+        product_type = str(row.get("product_type") or product.product_type or "Saree").strip()
+
+        price = product.supplier_price
+        if price is None and "supplier_price" in row:
+            try:
+                price = float(row["supplier_price"])
+            except (ValueError, TypeError):
+                pass
 
         sentences: list[str] = []
 
-        if brand and fabric:
+        if brand and fabric and catalog:
+            sentences.append(f"Discover this elegant {fabric} {product_type} from {brand} ({catalog} Collection).")
+        elif brand and fabric:
             sentences.append(f"Discover this elegant {fabric} {product_type} from {brand}.")
-        elif brand:
-            sentences.append(f"Discover this premium {product_type} from {brand}.")
+        elif brand and catalog:
+            sentences.append(f"Discover this premium {product_type} from {brand} ({catalog} Collection).")
         elif fabric:
             sentences.append(f"Designed in premium {fabric} fabric.")
+        elif catalog:
+            sentences.append(f"Premium quality {product_type} from {catalog} Collection.")
+        else:
+            sentences.append(f"Premium quality {product_type}.")
 
         if work:
             sentences.append(f"Showcases exquisite {work}.")
@@ -220,10 +242,22 @@ class AmraWorkbookTransformer:
         if occasion:
             sentences.append(f"An excellent choice for {occasion}, offering elegance, comfort, and timeless appeal.")
 
+        if price is not None and price > 0:
+            formatted_price = f"{int(price):,}" if price.is_integer() else f"{price:,.2f}"
+            sentences.append(f"Single piece dropshipping price: ₹{formatted_price}.")
+
         if not sentences:
-            return f"Premium quality {product.catalog_name} {product_type}."
+            return f"Premium quality {catalog} {product_type}."
 
         return " ".join(sentences)
+
+    @classmethod
+    def generate_description(
+        cls,
+        product: Product,
+        row_dict: dict[str, Any],
+    ) -> str:
+        return cls.generate_factual_description(product, row_dict)
 
     @classmethod
     def discover_and_sort_images(cls, images_path: Union[str, Path]) -> list[Path]:
@@ -255,21 +289,22 @@ class AmraWorkbookTransformer:
     ) -> list[dict[str, Any]]:
         """
         Transform canonical Product and Variant domain models into the exact Amra schema rows.
+        The pre-ready export is a strict projection of the canonical data.
         """
-        # Discover images if provided
+        # Discover images if provided for fallback matching only
         image_files = cls.discover_and_sort_images(images_path) if images_path else []
 
-        # Analyze colors and map image identifiers
         image_analysis: list[dict[str, Any]] = []
-        for img_path in image_files:
-            sku = img_path.stem
-            res: ImageColorResult = ImageColorAnalyzer.analyze_image(img_path, crop_center_ratio=0.6)
-            image_analysis.append({
-                "image_path": img_path,
-                "image_sku": sku,
-                "color_result": res,
-                "color": res.canonical_color if (res.status == "EXTRACTED" and not res.is_ambiguous) else None,
-            })
+        if image_files:
+            for img_path in image_files:
+                sku = img_path.stem
+                res: ImageColorResult = ImageColorAnalyzer.analyze_image(img_path, crop_center_ratio=0.6)
+                image_analysis.append({
+                    "image_path": img_path,
+                    "image_sku": sku,
+                    "color_result": res,
+                    "color": res.canonical_color if (res.status == "EXTRACTED" and not res.is_ambiguous) else None,
+                })
 
         out_rows: list[dict[str, Any]] = []
 
@@ -288,12 +323,8 @@ class AmraWorkbookTransformer:
             size = prod.get_attribute("size") or ""
             gst_percent = f"{int(prod.gst_percent)}% Extra" if prod.gst_percent is not None else ""
 
-            # Check if variants already have image_sku or if we align with discovered images
             variants = prod.variants
-
-            # If images provided, align variants with image_files in deterministic order
             num_images = len(image_analysis)
-            num_variants = len(variants)
 
             for var_idx, var in enumerate(variants):
                 row: dict[str, Any] = {}
@@ -301,8 +332,11 @@ class AmraWorkbookTransformer:
                 row["supplier_name"] = prod.supplier_name or "Amra Wholesale"
                 row["catalog_name"] = prod.catalog_name
                 row["product_group"] = prod_group
-                # Customer-facing product name: use synthesized name if prod.product_name is identical to catalog_name
-                if not prod.product_name or prod.product_name.strip() == (prod.catalog_name or "").strip():
+
+                # Customer-facing product name: use canonical product_name
+                if prod.product_name and prod.product_name.strip() != (prod.catalog_name or "").strip():
+                    p_name = prod.product_name
+                else:
                     p_name = cls.generate_customer_product_name(
                         catalog_name=prod.catalog_name,
                         brand_name=prod.brand_name,
@@ -310,8 +344,6 @@ class AmraWorkbookTransformer:
                         work=work,
                         product_type=prod.product_type,
                     )
-                else:
-                    p_name = prod.product_name
                 row["product_name"] = p_name
                 row["product_type"] = prod.product_type or "Saree"
                 row["category_slug"] = prod.category_slug or "sarees"
@@ -325,32 +357,25 @@ class AmraWorkbookTransformer:
                 # Supplier SKU: Explicit source SKU takes precedence, else fallback
                 row["supplier_sku"] = var.supplier_sku or fallback_sku or ""
 
-                # Variant pricing
-                # supplier_price: Single-piece dropshipping rule (prod.supplier_price)
+                # Variant pricing (single-piece dropshipping rule)
                 row["supplier_price"] = prod.supplier_price if prod.supplier_price is not None else var.supplier_cost
                 row["gst_percent"] = gst_percent
                 row["selling_price"] = var.selling_price if var.selling_price is not None else ""
 
-                # Image SKU & Variant Name from images
-                # Priority:
-                # 1. Existing variant image_sku / color if already populated
-                # 2. Image analysis match if var_idx < num_images
+                # Image SKU & Variant Name directly from canonical model
                 matched_img = image_analysis[var_idx] if var_idx < num_images else None
 
                 if var.image_sku:
                     image_sku_val = var.image_sku
                 elif matched_img:
                     image_sku_val = matched_img["image_sku"]
-                    var.image_sku = image_sku_val
                 else:
                     image_sku_val = ""
 
                 if var.color:
                     varient_name_val = var.color
                 elif matched_img and matched_img["color"]:
-                    color_val = matched_img["color"]
-                    varient_name_val = color_val
-                    var.color = color_val
+                    varient_name_val = matched_img["color"]
                 elif var.variant_name and not var.variant_name.lower().startswith("design "):
                     varient_name_val = var.variant_name
                 else:
@@ -359,18 +384,41 @@ class AmraWorkbookTransformer:
                 row["varient_name"] = varient_name_val
                 row["image-sku"] = image_sku_val
 
-                # Image URLs: Blank before Blob upload
-                row["image_url"] = ""
-                row["image1_url"] = ""
-                row["image2_url"] = ""
-                row["image3_url"] = ""
-                row["image4_url"] = ""
+                # Image URLs: Primary image URL from variant or image asset (strictly remote URLs only)
+                def _is_remote_url(val: Optional[str]) -> bool:
+                    if not val:
+                        return False
+                    s = str(val).strip()
+                    return s.startswith("http://") or s.startswith("https://") or "blob.vercel-storage.com" in s
 
-                # Description: Generate or reuse
-                desc_val = cls.generate_description(prod, row)
-                row["description"] = desc_val
-                if not prod.description:
+                hero_url = var.primary_image_url if _is_remote_url(var.primary_image_url) else ""
+                if not hero_url and var.images:
+                    for img in var.images:
+                        if _is_remote_url(img.blob_url):
+                            hero_url = img.blob_url
+                            break
+                row["image_url"] = hero_url
+
+                gal_urls = [u for u in (var.gallery_image_urls or []) if _is_remote_url(u)]
+                if not gal_urls and var.images:
+                    for img in var.images:
+                        if img.blob_url and _is_remote_url(img.blob_url) and img.blob_url != hero_url:
+                            gal_urls.append(img.blob_url)
+
+                row["image1_url"] = gal_urls[0] if len(gal_urls) > 0 else ""
+                row["image2_url"] = gal_urls[1] if len(gal_urls) > 1 else ""
+                row["image3_url"] = gal_urls[2] if len(gal_urls) > 2 else ""
+                row["image4_url"] = gal_urls[3] if len(gal_urls) > 3 else ""
+
+                row["publish"] = var.publish
+
+                # Factual description
+                if prod.description:
+                    desc_val = prod.description
+                else:
+                    desc_val = cls.generate_factual_description(prod, row)
                     prod.description = desc_val
+                row["description"] = desc_val
 
                 # Publish flag: Strictly False until human review/approval
                 row["publish"] = False

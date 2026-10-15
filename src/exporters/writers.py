@@ -98,11 +98,20 @@ class OutputWriter:
         cols = list(df.columns)
         ws.append(cols)
 
+        import json
         formula_prefixes = ("=", "+", "-", "@")
         for row_vals in df.itertuples(index=False):
-            ws.append(list(row_vals))
+            safe_vals = []
+            for val in row_vals:
+                if isinstance(val, (dict, list)):
+                    safe_vals.append(json.dumps(val, default=str))
+                elif pd.isna(val):
+                    safe_vals.append(None)
+                else:
+                    safe_vals.append(val)
+            ws.append(safe_vals)
             row_idx = ws.max_row
-            for col_idx, val in enumerate(row_vals, start=1):
+            for col_idx, val in enumerate(safe_vals, start=1):
                 if isinstance(val, str) and val.startswith(formula_prefixes):
                     cell = ws.cell(row=row_idx, column=col_idx)
                     cell.data_type = "s"

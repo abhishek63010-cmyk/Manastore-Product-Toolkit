@@ -166,6 +166,9 @@ class DeterministicImageMatcher:
                             }
                         )
                         target_variant.images.append(asset)
+                        if is_hero:
+                            if not target_variant.image_sku:
+                                target_variant.image_sku = img.normalized_stem
 
         matched_count = sum(1 for f in findings if f.status == MatchStatus.MATCHED)
         unmatched_count = sum(1 for f in findings if f.status == MatchStatus.UNMATCHED)
@@ -326,9 +329,53 @@ class DeterministicImageMatcher:
                                 if var not in matched_variants:
                                     matched_variants.append(var)
 
+                # Supplementary: Sequence index matching within scoped product (e.g. Rajtex-N-001 -> Design 01 / V01)
+                is_sequence_match = False
+                seq_idx_matched = None
+                generic_photo_suffixes = {"photo", "photos", "image", "images", "img", "pic", "pics", "picture", "pictures", "shot", "shots", "frame", "frames", "page", "pages"}
+                stem_tokens = clean_stem.split("-")
+                is_generic_photo_name = len(stem_tokens) >= 2 and stem_tokens[-2] in generic_photo_suffixes
+
+                if not matched_variants and prod.variants and not is_generic_photo_name:
+                    seq_match = re.search(r"(?:[_\-]|^0*)(\d{1,4})$", clean_stem)
+                    if seq_match:
+                        try:
+                            seq_num = int(seq_match.group(1))
+                            if 1 <= seq_num <= len(prod.variants):
+                                cand_var = prod.variants[seq_num - 1]
+                                v_code_clean = cand_var.variant_code.casefold()
+                                v_name_clean = (cand_var.variant_name or "").casefold()
+                                is_seq_placeholder = (
+                                    f"v{seq_num:02d}" in v_code_clean
+                                    or f"v{seq_num}" in v_code_clean
+                                    or f"-{seq_num:02d}" in v_code_clean
+                                    or f"-{seq_num}" in v_code_clean
+                                    or f"design {seq_num:02d}" in v_name_clean
+                                    or f"design {seq_num}" in v_name_clean
+                                    or f"{seq_num:02d}" in v_code_clean
+                                )
+                                if is_seq_placeholder:
+                                    matched_variants.append(cand_var)
+                                    is_sequence_match = True
+                                    seq_idx_matched = seq_num
+                        except (ValueError, TypeError):
+                            pass
+
                 if len(matched_variants) == 1:
                     chosen = matched_variants[0]
-                    strategy = "OCR_CANDIDATE_VARIANT_MATCH" if (not (chosen.color and cls._clean_token(chosen.color) in clean_rel_path) and not (chosen.variant_name and cls._clean_token(chosen.variant_name) in clean_rel_path)) else "SCOPED_PRODUCT_COLOR_TOKEN"
+                    if is_sequence_match:
+                        strategy = "SCOPED_DESIGN_SEQUENCE_INDEX"
+                        conf = 0.90
+                        reason_str = f"Matched scoped catalogue '{prod.catalog_name}' sequence index {seq_idx_matched} with variant '{chosen.variant_code}'"
+                    elif (not (chosen.color and cls._clean_token(chosen.color) in clean_rel_path) and not (chosen.variant_name and cls._clean_token(chosen.variant_name) in clean_rel_path)):
+                        strategy = "OCR_CANDIDATE_VARIANT_MATCH"
+                        conf = 0.85
+                        reason_str = f"Matched scoped catalog '{prod.catalog_name}' with variant '{chosen.variant_code}'"
+                    else:
+                        strategy = "SCOPED_PRODUCT_COLOR_TOKEN"
+                        conf = 0.85
+                        reason_str = f"Matched scoped catalog '{prod.catalog_name}' with variant '{chosen.variant_code}'"
+
                     return ImageMatchFinding(
                         image=img,
                         status=MatchStatus.MATCHED,
@@ -337,8 +384,8 @@ class DeterministicImageMatcher:
                         matched_variant_code=chosen.variant_code,
                         matched_supplier_sku=chosen.supplier_sku,
                         match_strategy=strategy,
-                        confidence=0.85,
-                        reason=f"Matched scoped catalog '{prod.catalog_name}' with variant '{chosen.variant_code}'",
+                        confidence=conf,
+                        reason=reason_str,
                     )
                 elif len(matched_variants) > 1:
                     return ImageMatchFinding(

@@ -6,6 +6,7 @@ from src.images.inventory import ImageInventory
 from src.images.manifest import ApprovalStatus, ImageApprovalManifest, ImageManifestEntry
 from src.images.uploader import ImageUploadSummary
 from src.models.product import Product
+from src.models.provenance import FieldSource
 from src.models.refined import RefinedExport, RefinedVariantRecord
 from src.models.validation import ValidationReport
 from src.ocr.models import OCRResult, OCRStatus
@@ -363,13 +364,66 @@ class ProductEnrichmentService:
             # Populate exact canonical variant row attributes from approved image
             var.image_sku = enriched_image_sku
             var.color = enriched_color
+            var.attributes["candidate_image_sku"] = enriched_image_sku
+            var.attributes["image_color_candidate"] = enriched_color
+            if color_result and color_result.canonical_color:
+                var.attributes["color_evidence"] = {
+                    "canonical_color": color_result.canonical_color,
+                    "confidence": color_result.confidence,
+                    "hex_code": color_result.hex_code,
+                    "notes": color_result.notes,
+                }
+        elif var.images:
+            # Deterministically matched image available on variant
+            hero_asset = var.images[0]
+            cand_sku = var.image_sku or Path(hero_asset.original_filename).stem
+            enriched_image_sku = cand_sku
+            var.image_sku = cand_sku
+            var.attributes["candidate_image_sku"] = cand_sku
+
+            color_result = None
+            if hero_asset.local_path and Path(hero_asset.local_path).is_file():
+                color_result = ImageColorAnalyzer.analyze_image(hero_asset.local_path, crop_center_ratio=0.6)
+
+            if color_result:
+                image_color_status = color_result.status
+                image_color_confidence = color_result.confidence
+                image_color_hex = color_result.hex_code
+                image_color_notes = color_result.notes
+
+                if color_result.status == "EXTRACTED" and not color_result.is_ambiguous and color_result.canonical_color:
+                    enriched_color = color_result.canonical_color
+                    var.attributes["image_color_candidate"] = enriched_color
+                    var.attributes["color_evidence"] = {
+                        "canonical_color": enriched_color,
+                        "confidence": color_result.confidence,
+                        "hex_code": color_result.hex_code,
+                        "notes": color_result.notes,
+                    }
+                    if not var.color:
+                        var.color = enriched_color
+                else:
+                    enriched_color = None
+            else:
+                image_color_status = "NOT_ANALYZED"
+
+            if enriched_color and not var.color:
+                var.color = enriched_color
+
+            # Record provenance
+            if enriched_image_sku:
+                var.source_metadata.track_field("image_sku", FieldSource.DERIVED, raw_value=enriched_image_sku, notes="Extracted from matched image filename")
+            if enriched_color:
+                var.source_metadata.track_field("color", FieldSource.DERIVED, raw_value=enriched_color, notes=f"Extracted from pixel color analysis (confidence={image_color_confidence})")
         else:
-            # Without approved image, canonical color and image_sku MUST remain empty
+            # Without approved image or matched image, canonical color and image_sku MUST remain empty
             enriched_image_sku = None
             enriched_color = None
             image_color_status = "NOT_ANALYZED"
             var.image_sku = None
             var.color = None
+            requires_review = True
+            review_reasons.append("Missing image assignment")
 
         # Preserve variant name without mutation
         var.variant_name = original_variant_name

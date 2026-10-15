@@ -193,6 +193,9 @@ class PipelineOrchestrator:
                 f"{refined_export.variants_requiring_review} require review)"
             )
 
+        # Re-validate canonical models post-enrichment
+        validation_report = GenericProductValidator.validate_products(products)
+
         # 6.5. Canonical Export Assembly (reflects enriched color & image_sku)
         export_data = CanonicalExport.from_products(
             products=products,

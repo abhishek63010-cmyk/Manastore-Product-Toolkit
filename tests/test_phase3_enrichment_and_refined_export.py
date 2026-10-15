@@ -434,6 +434,10 @@ def test_refined_excel_and_mana_store_export_files(tmp_path: Path, sample_produc
     assert first_row["main_image_url"] == "" or pd.isna(first_row["main_image_url"])  # No Blob URL uploaded yet
 
 
+@pytest.mark.skipif(
+    not Path("input/raw-catalog-001/MANA_Raw_Supplier_Data.xlsx").exists(),
+    reason="Optional local benchmark data not present in worktree",
+)
 def test_three_catalogue_benchmark_phase3_enrichment(tmp_path: Path):
     """
     Run the end-to-end pipeline benchmark on the 3 real supplier catalogues

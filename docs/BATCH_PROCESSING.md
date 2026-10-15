@@ -191,3 +191,31 @@ If catalogue #2 in a 3-catalogue batch fails:
 2. Fix the source data, image folder, or adapter in `config/batch-manifest.json` (you can comment out or remove catalogue #1 and #3 to only re-run catalogue #2).
 3. Run `.\scripts\run-batch.ps1`.
 4. A new batch folder with the fixed catalogue's `manastore_pre_ready.xlsx` will be generated.
+
+---
+
+## 8. Consolidating Workbooks After Review (`combine-pre-ready.py`)
+
+After a batch finishes, you can review and edit each catalogue's individual `manastore_pre_ready.xlsx` workbook in its subfolder. Once reviewed and saved, use the standalone consolidation script to combine them into a single admin import workbook at the batch root:
+
+```powershell
+python scripts/combine-pre-ready.py "output/<BATCH_FOLDER>"
+```
+
+### Preview Without Creating Output (Dry Run)
+```powershell
+python scripts/combine-pre-ready.py "output/<BATCH_FOLDER>" --dry-run
+```
+
+### Overwrite an Existing Combined Workbook
+```powershell
+python scripts/combine-pre-ready.py "output/<BATCH_FOLDER>" --force
+```
+
+### Key Safety Guarantees:
+- **Zero changes to source files**: Individual catalogue workbooks are never modified, moved, or deleted.
+- **Strict schema validation**: All workbooks must match the exact 26-column Amra schema in the correct order.
+- **Safe discovery**: Scans only immediate catalogue subdirectories; ignores `_internal/`, `_reports/`, and existing root files.
+- **Data integrity**: Retains all data types, blank cells, repeated `No` values, prices, URLs, and rows without recalculation or deduplication.
+- **Summary**: Creates `consolidation_summary.txt` and `<BATCH_FOLDER>/manastore_pre_ready.xlsx` at the batch directory root.
+
